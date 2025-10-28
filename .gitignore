@@ -1,0 +1,74 @@
+# 编译输出
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+
+# Go 测试覆盖率文件
+*.out
+coverage.txt
+coverage.html
+
+# Go 依赖文件（vendor 目录可选）
+# vendor/
+
+# IDE 和编辑器配置文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 备份文件
+*.bak
+*.backup
+*.tmp
+
+# 日志文件
+*.log
+logs/
+
+# 临时文件
+tmp/
+temp/
+*.pid
+
+# 系统文件
+Thumbs.db
+.directory
+
+# 环境变量文件
+.env
+.env.local
+
+# 调试文件
+debug
+__debug_bin
+
+# 编译器生成的文件
+*.o
+*.a
+*.lib
+
+# 可执行文件
+excavator
+excavator-*
+
+# ROS2 相关
+install/
+build/
+log/
+
+# 测试生成的文件
+*.test
+testdata/
+
+# 性能分析文件
+*.pprof
+cpu.prof
+mem.prof
+
