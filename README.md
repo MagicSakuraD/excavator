@@ -1,281 +1,202 @@
-# 🚜 挖掘机远程控制系统
+# Excavator WebRTC Bridge v2.0
 
-基于 WebRTC + WebSocket 的挖掘机远程视频监控系统
+这是一个低延迟的 WebRTC 视频流解决方案，旨在将来自 ROS2 的视频（物理摄像头或 Isaac Sim）高效地传输到远程 Web 浏览器，并实现双向控制。
 
-## 📁 项目结构
+## 🏛️ 核心架构 (v2.0)
+
+本方案采用 Go 作为 WebRTC 客户端，并通过标准的 `stdin/stdout` 管道与一个 Python 脚本进行双向通信，完全移除了对 `rclgo` 的依赖，实现了极致的解耦和稳定性。
 
 ```
-excavator/
-├── cmd/
-│   ├── signaling/         # 信令服务器（WebSocket）
-│   └── excavator/         # 挖掘机端程序（Orin）
-├── web/
-│   └── controller.html    # 远程控制网页
-├── bin/
-│   ├── signaling          # 信令服务器可执行文件
-│   └── excavator          # 挖掘机程序可执行文件
-└── scripts/               # 启动脚本
++--------------------------+      +------------------+      +---------------------------+
+| [ROS2 H.264 Publisher]   |----->| [ROS2 Topic]     |<-----| [Python Bridge] (Subscribe)|
+| (Python, GStreamer HW/SW)|      | CompressedImage  |      +---------------------------+
++--------------------------+      +------------------+                    |  (stdout)
+                                                                         | [H.264 + Timestamp]
+                                                                         v
++--------------------------+      +------------------+      +---------------------------+
+| [Control Application]    |----->| [ROS2 Topic]     |----->| [Python Bridge] (Publish)   |
+| (e.g., teleop_twist_joy) |      | std_msgs/String  |      +---------------------------+
++--------------------------+      +------------------+                    ^  (stdin)
+                                                                         | [Control JSON]
+                                                                         |
+       +-----------------------------------------------------------------+
+       |
+       v
++-------------------------------------------------------------+      +-----------------+
+| [Excavator - Go WebRTC Client]                              |<---->| [Signaling    ] |
+| - Manages Python Bridge subprocess                          |      | [Server       ] |
+| - Reads H.264 from stdout, writes Control JSON to stdin     |      +-----------------+
+| - Handles all WebRTC logic (PeerConnection, ICE, DataChannel)|
++-------------------------------------------------------------+
+       ^
+       | (WebRTC)
+       v
++--------------------------+
+| [Browser]                |
+| (Next.js Controller)     |
++--------------------------+
 ```
 
-## 🚀 快速开始
+## ✨ 功能特性
 
-### 准备工作
+- **ROS2 Humble 集成**: 无缝接入现有 ROS2 系统。
+- **低延迟视频流**: 利用 H.264 传递压缩视频流，避免重复编解码。
+- **硬件加速优化**:
+    - 在 **NVIDIA Jetson (Orin, Xavier)** 平台，使用 `nvv4l2h264enc` 进行硬件编码。
+    - 在 **x86 PC** 平台，支持使用 `x264enc` (软件) 或 `nvh264enc` (NVIDIA 显卡) 进行编码。
+- **双向控制**: 通过 WebRTC DataChannel 从浏览器发送 JSON 指令，实时控制 ROS2 节点。
+- **高稳定性**: Go 主进程管理 Python 子进程，通过 `stdin/stdout` 管道通信，稳定可靠。
+- **精确帧率控制**: 从 ROS2 消息头中提取精确的时间戳，用于计算 `media.Sample` 的 `Duration`，保证视频播放平滑。
 
-**需要 3 个设备：**
-1. **云服务器/VPC** - 运行信令服务器
-2. **装载机 Orin** - 运行挖掘机程序
-3. **控制端电脑** - 打开浏览器控制
+## 📦 部署与设置
 
-### 第一步：启动信令服务器（云服务器）
+### 通用依赖
+
+- Ubuntu 22.04
+- ROS2 Humble
+- Go 1.18+
+- Python 3.10+ (`rclpy`, `pygobject`)
+
+---
+
+### A) NVIDIA Jetson (Orin/Xavier) 平台指南
+
+**这是本项目的默认和最佳实践平台。**
+
+#### 1. 安装 GStreamer 依赖
+
+JetPack 通常已包含所有必要的 GStreamer 插件 (`nvidia-l4t-gstreamer`)。如果缺失，请安装：
+```bash
+sudo apt update
+sudo apt install python3-gi python3-gst-1.0 gir1.2-gst-1.0 gstreamer1.0-tools gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+```
+验证硬件编码器是否存在：
+```bash
+gst-inspect-1.0 nvv4l2h264enc
+```
+
+#### 2. 配置信令服务器
+
+修改 `web/controller.html` 文件，将其中的 `SIGNALING_SERVER` 地址指向你的云服务器 IP。
+```javascript
+// web/controller.html
+const SIGNALING_SERVER = 'ws://111.186.56.118:8090/ws'; // <-- 修改这里
+```
+
+#### 3. 构建 Go 程序
+
+脚本会自动处理编译，你也可以手动执行一次以确保依赖正确。
+```bash
+# 在项目根目录
+go mod tidy
+```
+
+---
+
+### B) 标准 x86 Ubuntu 平台指南
+
+#### 1. 安装 GStreamer 依赖
+
+你需要安装包含 `x264enc` (软件编码器) 的插件包。
+```bash
+sudo apt update
+sudo apt install python3-gi python3-gst-1.0 gir1.2-gst-1.0 gstreamer1.0-tools gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
+```
+- **(可选) 如果你有 NVIDIA 桌面显卡**:
+  - 安装最新的 NVIDIA 驱动和 CUDA Toolkit。
+  - 确保 GStreamer 的 `nvh264enc` 插件可用 (通常在 `gstreamer1.0-plugins-bad` 中)。
+  - 验证编码器: `gst-inspect-1.0 x264enc` 或 `gst-inspect-1.0 nvh264enc`。
+
+#### 2. **[关键]** 修改摄像头发布节点
+
+打开 `scripts/ros2_h264_camera_publisher.py` 文件，将其中的 GStreamer `pipeline_str` 替换为适合 x86 的版本。
+
+**替换前的 Jetson 版本:**
+```python
+        pipeline_str = (
+            f"v4l2src device={device} ! "
+            f"video/x-raw,width={width},height={height},framerate={fps}/1 ! "
+            "nvvidconv ! "
+            "video/x-raw(memory:NVMM),format=NV12 ! "
+            f"nvv4l2h264enc bitrate={bitrate} preset-level=1 insert-sps-pps=true idrinterval={fps} iframeinterval={fps} ! "
+            "video/x-h264,stream-format=byte-stream,alignment=au ! "
+            "h264parse config-interval=-1 ! "
+            "appsink name=sink emit-signals=true max-buffers=4 drop=true sync=false"
+        )
+```
+
+**替换为 x86 (软件编码 `x264enc`) 版本:**
+```python
+        pipeline_str = (
+            f"v4l2src device={device} ! "
+            f"video/x-raw,width={width},height={height},framerate={fps}/1 ! "
+            "videoconvert ! "
+            "video/x-raw,format=I420 ! "
+            f"x264enc speed-preset=ultrafast tune=zerolatency bitrate={int(bitrate/1000)} key-int-max={fps} ! "
+            "video/x-h264,stream-format=byte-stream,alignment=au ! "
+            "h264parse config-interval=-1 ! "
+            "appsink name=sink emit-signals=true max-buffers=4 drop=true sync=false"
+        )
+```
+> **注意**: 如果你使用 NVIDIA 桌面显卡，可以将 `x264enc ...` 这一行替换为 `nvh264enc ...`，具体参数请查阅 GStreamer 文档。
+
+#### 3. 配置信令服务器 & 构建 Go 程序
+这部分与 Jetson 平台完全相同，请参考 **A)** 部分的步骤 2 和 3。
+
+
+## 🚀 运行项目
+
+你需要**两个**终端来分别启动摄像头节点和主程序。
+
+### 终端 1: 启动 ROS2 摄像头发布节点
 
 ```bash
-# 在云服务器上运行
-cd excavator/bin
-./signaling -addr :8090
-```
+# source ROS2 环境
+source /opt/ros/humble/setup.bash
 
-**输出示例：**
-```
-🚀 信令服务器启动: :8090
-📡 WebSocket 端点: ws://<服务器IP>:8090/ws
-📊 状态查询: http://<服务器IP>:8090/status
-```
+cd /path/to/your/project/excavator/scripts
 
-### 第二步：启动挖掘机程序（Orin）
+# 启动摄像头发布脚本
+# 它会使用 v4l2 捕获摄像头，(硬/软)编码为 H.264，然后发布到 ROS2 话题
+./start-ros2-h264-camera.sh
+```
+> 脚本接受参数，例如: `./start-ros2-h264-camera.sh --device /dev/video1 --width 1280 --height 720`
+
+### 终端 2: 启动 Excavator 桥接程序
 
 ```bash
-# 在 Orin 上运行
-cd excavator/bin
+# source ROS2 环境
+source /opt/ros/humble/setup.bash
 
-# 替换 <服务器IP> 为你的信令服务器 IP
-./excavator \
-  -signaling ws://<服务器IP>:8090/ws \
-  -camera /dev/video0 \
-  -width 640 \
-  -height 480 \
-  -fps 30
+cd /path/to/your/project/excavator/scripts
+
+# 启动主程序脚本
+# 它会编译并运行 Go 程序，Go 程序会自动启动 Python 桥接子进程
+./start-excavator-bridge.sh
 ```
+> 你可以修改脚本内的 `SIGNALING_SERVER` 变量，或通过环境变量来覆盖它。
 
-**输出示例：**
-```
-🚀 挖掘机端启动...
-📡 连接信令服务器: ws://x.x.x.x:8090/ws
-✅ 已注册为 excavator
-📹 摄像头: /dev/video0 (640x480@30fps)
-⏳ 等待控制端连接...
-```
+### 步骤 3: 连接控制端
 
-### 第三步：打开控制页面（浏览器）
+打开你的 Web 浏览器，访问你部署在云服务器上的 `controller.html` 页面。页面加载后会自动连接信令服务器，并与 Excavator 建立 WebRTC 连接。连接成功后，你应该能看到来自 ROS2 的视频流，并且可以发送控制指令。
 
-1. **编辑控制页面配置：**
-   打开 `web/controller.html`，修改第 122 行：
-   ```javascript
-   const SIGNALING_SERVER = 'ws://<服务器IP>:8090/ws';
-   ```
-
-2. **在浏览器打开：**
-   ```bash
-   # 方式 1：直接双击打开 controller.html
-   
-   # 方式 2：通过 HTTP 服务器
-   cd excavator/web
-   python3 -m http.server 8080
-   # 然后浏览器访问 http://localhost:8080/controller.html
-   ```
-
-3. **点击 "连接挖掘机" 按钮**
-
-4. **看到视频画面！** 🎉
-
-## ⚙️ 参数说明
-
-### 信令服务器参数
+### (可选) 终端 3: 查看日志
 
 ```bash
-./signaling -addr <地址>
+# 查看 Go 主程序和 Python 桥接的日志
+tail -f /path/to/your/project/excavator/logs/excavator-bridge.log
+
+# 查看摄像头发布节点的日志
+tail -f /path/to/your/project/excavator/logs/ros2-h264-camera.log
 ```
 
-- `-addr`: 监听地址（默认 `:8090`）
+## 🛑 停止所有进程
 
-### 挖掘机程序参数
+我们提供了一个方便的脚本来清理所有相关的后台进程。
 
 ```bash
-./excavator [选项]
+cd /path/to/your/project/excavator/scripts
+./kill-all.sh
 ```
-
-- `-signaling`: 信令服务器地址（**必填**）
-- `-camera`: 摄像头设备（默认 `/dev/video0`）
-- `-width`: 视频宽度（默认 `640`）
-- `-height`: 视频高度（默认 `480`）
-- `-fps`: 视频帧率（默认 `30`）
-
-**示例：**
-
-```bash
-# 使用 1080p @ 30fps
-./excavator -signaling ws://10.0.1.100:8090/ws -width 1920 -height 1080 -fps 30
-
-# 使用不同的摄像头
-./excavator -signaling ws://10.0.1.100:8090/ws -camera /dev/video1
-```
-
-## 📊 架构说明
-
-```
-┌─────────────┐      WebSocket      ┌─────────────┐
-│   控制端     │◄──────信令───────────│  云服务器    │
-│  (浏览器)    │                      │ (信令服务器) │
-└──────┬──────┘                      └─────┬───────┘
-       │                                   │
-       │         WebRTC P2P连接           │ WebSocket
-       │         (音视频数据)              │   信令
-       │                                   │
-       └────────────────┬──────────────────┘
-                       │
-                ┌──────▼──────┐
-                │  装载机      │
-                │  (Orin)      │
-                │  摄像头+编码  │
-                └─────────────┘
-```
-
-### 信令流程
-
-1. **注册阶段**
-   - 控制端连接信令服务器 → 注册为 `controller`
-   - 挖掘机连接信令服务器 → 注册为 `excavator`
-
-2. **建立连接**
-   - 控制端创建 Offer → 通过信令服务器发送给挖掘机
-   - 挖掘机创建 Answer → 通过信令服务器发送回控制端
-   - 交换 ICE 候选
-
-3. **数据传输**
-   - WebRTC P2P 连接建立
-   - 视频/音频流直接传输（不经过信令服务器）
-
-## 🔥 核心特性
-
-✅ **自动 SDP 交换** - 无需手动复制粘贴  
-✅ **Nvidia 硬件编码** - 使用 Orin 的 H.264 硬件编码器  
-✅ **低延迟传输** - WebRTC P2P 直连  
-✅ **自动重连** - 网络断开自动恢复  
-✅ **实时日志** - 连接状态实时显示  
-✅ **DataChannel 支持** - 接收浏览器控制指令  
-🔧 **ROS2 集成** - 控制消息发布到 ROS2（开发中）  
-
-## 🤖 ROS2 功能
-
-### 已实现
-
-✅ **DataChannel 控制接收** - 从浏览器接收控制指令  
-✅ **ROS2 消息类型定义** - 兼容 Python/Rust 客户端  
-✅ **ROS2 客户端框架** - 发布/订阅接口已就绪  
-
-### 开发中
-
-🔧 **控制消息发布** - 发布到 `/controls/teleop` 话题  
-🔧 **ROS2 视频源** - 从 `/camera_front_wide` 获取视频  
-
-### 使用示例
-
-```bash
-# 启用 ROS2 功能
-./bin/excavator \
-  -signaling ws://192.168.3.57:8090/ws \
-  -enable-ros2 true \
-  -ros2-control-topic /controls/teleop
-
-# 监听 ROS2 控制消息（新终端）
-ros2 topic echo /controls/teleop std_msgs/msg/String
-```
-
-**详细文档**: [ROS2_INTEGRATION.md](./ROS2_INTEGRATION.md) | [EXAMPLES.md](./EXAMPLES.md)
-
-## 🛠️ 故障排查
-
-### 控制端无法连接
-
-1. **检查信令服务器**
-   ```bash
-   curl http://<服务器IP>:8090/status
-   ```
-   应该返回在线客户端列表
-
-2. **检查防火墙**
-   ```bash
-   # 云服务器需要开放 8090 端口
-   sudo ufw allow 8090/tcp
-   ```
-
-### 连接成功但黑屏
-
-1. **检查摄像头**
-   ```bash
-   v4l2-ctl --device=/dev/video0 --all
-   ls -l /dev/video*
-   ```
-
-2. **查看挖掘机程序日志**
-   看是否有 GStreamer 错误
-
-3. **尝试软件编码**
-   修改视频源（去掉 nvvidconv）：
-   ```bash
-   ./excavator -signaling ws://... -video-src "v4l2src device=/dev/video0 ! videoconvert ! video/x-raw,format=I420"
-   ```
-
-### ICE 连接失败
-
-1. **本地网络测试**（同一局域网）
-   - 信令服务器和两端在同一网络
-   - 不需要 STUN/TURN
-
-2. **跨网络测试**（需要公网）
-   - 需要配置 STUN 服务器
-   - 或使用 TURN 中继服务器
-
-## 📝 开发日志
-
-- [x] 基础视频传输功能
-- [x] WebSocket 信令服务器
-- [x] 自动 SDP 交换
-- [x] Nvidia 硬件编码支持
-- [x] DataChannel 接收控制指令
-- [x] ROS2 消息类型定义
-- [x] ROS2 客户端框架
-- [ ] ROS2 控制消息发布实现
-- [ ] ROS2 视频源订阅
-- [ ] 网页键盘控制
-- [ ] 录像功能
-
-## 🎯 下一步计划
-
-### 优先级 1：ROS2 完整集成
-
-1. **完成控制消息发布**
-   - 实现 `publishControlToROS2` 函数
-   - 使用 rclgo 或命令行工具
-   - 测试控制指令传输
-
-2. **ROS2 视频源支持**
-   - 订阅 `/camera_front_wide`
-   - ROS2 Image → GStreamer 转换
-   - 与现有 H.264 编码集成
-
-### 优先级 2：用户体验提升
-
-3. **网页键盘控制** - WASD 控制移动，QE 控制臂架
-4. **游戏手柄支持** - 使用 Gamepad API
-5. **录像功能** - MediaRecorder 录制视频
-
-### 优先级 3：性能优化
-
-6. **零拷贝优化** - 减少内存拷贝
-7. **自适应码率** - 根据网络状况调整
-8. **多摄像头支持** - 同时传输多路视频
-
-## 📄 许可证
-
-MIT License
+该脚本会停止 Go 程序、Python 桥接和 Python 摄像头发布节点，并尝试释放摄像头设备。
 
