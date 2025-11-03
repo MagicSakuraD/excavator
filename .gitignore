@@ -54,9 +54,6 @@ __debug_bin
 *.a
 *.lib
 
-# 可执行文件
-excavator
-excavator-*
 
 # ROS2 相关
 install/
