@@ -1,52 +1,59 @@
-# Excavator WebRTC Bridge v2.0
+# Excavator WebRTC Bridge v3.0 (Shared Memory Solution)
 
-这是一个低延迟的 WebRTC 视频流解决方案，旨在将来自 ROS2 的视频（物理摄像头或 Isaac Sim）高效地传输到远程 Web 浏览器，并实现双向控制。
+这是一个**超低延迟**的 WebRTC 视频流和远程控制解决方案，专为 Isaac Sim / ROS2 仿真环境设计。通过**共享内存 + 进程隔离**架构，实现了零库冲突、硬件加速编码和双向实时控制。
 
-## 🏛️ 核心架构 (v2.0)
+## 🏛️ 核心架构 (v3.0 - Shared Memory)
 
-本方案采用 Go 作为 WebRTC 客户端，并通过标准的 `stdin/stdout` 管道与一个 Python 脚本进行双向通信，完全移除了对 `rclgo` 的依赖，实现了极致的解耦和稳定性。
+本方案采用**共享内存**作为数据传输通道，Go 作为 WebRTC 客户端，通过进程隔离实现了极致的稳定性和性能：
+
+- **视频流**: ROS2 → 共享内存 → GStreamer 硬编码 → Go → WebRTC → 浏览器
+- **控制流**: 浏览器 → WebRTC → Go → ROS2 发布器 → ROS2 话题
 
 ```
-+--------------------------+      +------------------+      +---------------------------+
-| [ROS2 H.264 Publisher]   |----->| [ROS2 Topic]     |<-----| [Python Bridge] (Subscribe)|
-| (Python, GStreamer HW/SW)|      | CompressedImage  |      +---------------------------+
-+--------------------------+      +------------------+                    |  (stdout)
-                                                                         | [H.264 + Timestamp]
-                                                                         v
-+--------------------------+      +------------------+      +---------------------------+
-| [Control Application]    |----->| [ROS2 Topic]     |----->| [Python Bridge] (Publish)   |
-| (e.g., teleop_twist_joy) |      | std_msgs/String  |      +---------------------------+
-+--------------------------+      +------------------+                    ^  (stdin)
-                                                                         | [Control JSON]
-                                                                         |
-       +-----------------------------------------------------------------+
-       |
-       v
-+-------------------------------------------------------------+      +-----------------+
-| [Excavator - Go WebRTC Client]                              |<---->| [Signaling    ] |
-| - Manages Python Bridge subprocess                          |      | [Server       ] |
-| - Reads H.264 from stdout, writes Control JSON to stdin     |      +-----------------+
-| - Handles all WebRTC logic (PeerConnection, ICE, DataChannel)|
-+-------------------------------------------------------------+
-       ^
-       | (WebRTC)
-       v
-+--------------------------+
-| [Browser]                |
-| (Next.js Controller)     |
-+--------------------------+
+Isaac Sim / ROS2 仿真
+         ↓
+    /stitched_image (sensor_msgs/Image, rgb8)
+         ↓
+┌─────────────────────────────┐
+│ ros_to_shm.py (ROS2 节点)   │
+│ - 订阅视频话题                │
+│ - 写入共享内存                │
+└──────────┬──────────────────┘
+           │ 共享内存 (/dev/shm)
+           ↓
+┌─────────────────────────────┐        云端信令服务器
+│ shm_to_stdout.py (GStreamer)│             ↑ WebSocket
+│ - nvh264enc 硬件编码         │             │
+│ - 输出 H.264 到 stdout       │             │
+└──────────┬──────────────────┘             │
+           │ stdout/stdin 管道               │
+           ↓                                │
+┌─────────────────────────────────────┐    │
+│ Go WebRTC 客户端 (main.go)           │←───┘
+│ - 读取 H.264 视频流                  │
+│ - 接收浏览器控制指令                 │
+│ - 转发到 ros_control_stdin.py       │
+└──────────┬──────────────────────────┘
+           │ stdin 管道
+           ↓
+┌─────────────────────────────┐
+│ ros_control_stdin.py        │
+│ - 读取 JSON 控制指令         │
+│ - 发布到 /controls/teleop   │
+└──────────┬──────────────────┘
+           ↓
+    ROS2 控制节点 (Isaac Sim)
 ```
 
 ## ✨ 功能特性
 
-- **ROS2 Humble 集成**: 无缝接入现有 ROS2 系统。
-- **低延迟视频流**: 利用 H.264 传递压缩视频流，避免重复编解码。
-- **硬件加速优化**:
-    - 在 **NVIDIA Jetson (Orin, Xavier)** 平台，使用 `nvv4l2h264enc` 进行硬件编码。
-    - 在 **x86 PC** 平台，支持使用 `x264enc` (软件) 或 `nvh264enc` (NVIDIA 显卡) 进行编码。
-- **双向控制**: 通过 WebRTC DataChannel 从浏览器发送 JSON 指令，实时控制 ROS2 节点。
-- **高稳定性**: Go 主进程管理 Python 子进程，通过 `stdin/stdout` 管道通信，稳定可靠。
-- **精确帧率控制**: 从 ROS2 消息头中提取精确的时间戳，用于计算 `media.Sample` 的 `Duration`，保证视频播放平滑。
+- **✅ 零库冲突**: ROS2 和 GStreamer 运行在独立进程，彻底避免段错误
+- **✅ 硬件加速**: NVIDIA `nvh264enc` GPU 编码，CPU 占用低
+- **✅ 超低延迟**: 共享内存纳秒级数据传输，端到端延迟 ~20ms
+- **✅ 双向控制**: WebRTC DataChannel 实现浏览器 ↔ ROS2 实时控制
+- **✅ 动态分辨率**: 自动适配视频分辨率变化（支持拼接图像）
+- **✅ 高稳定性**: Go 主进程管理 Python 子进程，自动重启机制
+- **✅ 易于部署**: 一键启动脚本，自动编译和环境检测
 
 ## 📦 部署与设置
 

@@ -1,20 +1,18 @@
 package main
 
 import (
-	"bufio"
-	"encoding/binary"
-	"encoding/json"
-	"flag"
-	"fmt"
-	"io"
-	"log"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"time"
+    "bufio"
+    "encoding/binary"
+    "encoding/json"
+    "flag"
+    "fmt"
+    "io"
+    "log"
+    "os"
+    "os/exec"
+    "path/filepath"
+    "time"
 
-	"github.com/go-gst/go-gst/gst"
-	"github.com/go-gst/go-gst/gst/app"
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
@@ -40,16 +38,13 @@ var (
 var (
 	videoTrack  *webrtc.TrackLocalStaticSample
 	audioTrack  *webrtc.TrackLocalStaticSample
-	pythonStdin io.WriteCloser
+    controlStdin io.WriteCloser
 )
 
 func main() {
 	flag.Parse()
 
 	log.SetFlags(log.Ltime | log.Lshortfile)
-
-	// 初始化 GStreamer
-	gst.Init(nil)
 
 	log.Printf("🚀 挖掘机端启动 (精简版)...")
 	log.Printf("📡 连接信令服务器: %s", *signalingURL)
@@ -90,10 +85,11 @@ func main() {
 		log.Fatalf("❌ 创建音频轨道失败: %v", err)
 	}
 
-	// 启动 Python 双向桥接 (视频输入/控制输出)
-	go startH264BridgeForwarder(*ros2ImageTopic, *ros2ControlTopic, videoTrack)
-	// 启动 GStreamer 音频管道 (测试音源)
-	go startGStreamerPipeline("opus", []*webrtc.TrackLocalStaticSample{audioTrack}, "audiotestsrc")
+    // 启动视频编码器 (SHM -> GStreamer -> stdout)
+    go startVideoStreamForwarder(videoTrack)
+
+    // 启动控制转发器 (stdin -> ROS2)
+    go startControlStreamForwarder(*ros2ControlTopic)
 
 	log.Printf("⏳ 等待控制端连接...")
 
@@ -235,11 +231,13 @@ func createPeerConnection(conn *websocket.Conn) (*webrtc.PeerConnection, error) 
 			log.Printf("✅ DataChannel '%s' 已打开", dc.Label())
 		})
 
-		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			if pythonStdin != nil {
-				go publishControlToROS2(msg.Data)
-			}
-		})
+        dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+            if controlStdin != nil {
+                go publishControlToROS2(msg.Data)
+            } else {
+                log.Printf("⚠️ 收到控制指令，但控制管道未就绪")
+            }
+        })
 
 		dc.OnClose(func() {
 			log.Printf("🔴 DataChannel '%s' 已关闭", dc.Label())
@@ -256,151 +254,99 @@ func createPeerConnection(conn *websocket.Conn) (*webrtc.PeerConnection, error) 
 	return pc, nil
 }
 
-func startGStreamerPipeline(codecName string, tracks []*webrtc.TrackLocalStaticSample, pipelineSrc string) {
-	pipelineStr := "appsink name=appsink"
+func startVideoStreamForwarder(videoTrack *webrtc.TrackLocalStaticSample) {
+    log.Printf("🚀 启动 GStreamer 硬件编码器 (SHM -> stdout)...")
 
-	switch codecName {
-	case "opus":
-		pipelineStr = pipelineSrc + " ! opusenc ! " + pipelineStr
-	default:
-		log.Fatalf("不支持的音频编解码器: %s", codecName)
-	}
+    exePath, err := os.Executable()
+    if err != nil {
+        log.Fatalf("❌ 无法获取当前执行路径: %v", err)
+    }
+    scriptPath := filepath.Join(filepath.Dir(exePath), "..", "scripts", "shm_solution", "shm_to_stdout.py")
 
-	log.Printf("🎬 启动 GStreamer 管道: %s", codecName)
+    cmd := exec.Command("python3", scriptPath)
+    stdout, err := cmd.StdoutPipe()
+    if err != nil {
+        log.Fatalf("❌ [Video] 创建 stdout 管道失败: %v", err)
+    }
+    cmd.Stderr = os.Stderr
+    if err := cmd.Start(); err != nil {
+        log.Fatalf("❌ [Video] 启动 shm_to_stdout.py 失败: %v", err)
+    }
+    log.Printf("✅ GStreamer 编码器已启动 (PID: %d)", cmd.Process.Pid)
 
-	pipeline, err := gst.NewPipelineFromString(pipelineStr)
-	if err != nil {
-		log.Fatalf("❌ 创建 GStreamer 管道失败: %v", err)
-	}
+    go func() {
+        defer cmd.Process.Kill()
+        defer stdout.Close()
 
-	if err = pipeline.SetState(gst.StatePlaying); err != nil {
-		log.Fatalf("❌ 启动 GStreamer 管道失败: %v", err)
-	}
+        reader := bufio.NewReaderSize(stdout, 128*1024)
+        header := make([]byte, 12) // 4B length + 8B timestamp_ns (big-endian)
+        var lastTs uint64
 
-	appSink, err := pipeline.GetElementByName("appsink")
-	if err != nil {
-		log.Fatalf("❌ 获取 appsink 失败: %v", err)
-	}
-
-	app.SinkFromElement(appSink).SetCallbacks(&app.SinkCallbacks{
-		NewSampleFunc: func(sink *app.Sink) gst.FlowReturn {
-			sample := sink.PullSample()
-			if sample == nil {
-				return gst.FlowEOS
-			}
-			buffer := sample.GetBuffer()
-			if buffer == nil {
-				return gst.FlowError
-			}
-			samples := buffer.Map(gst.MapRead).Bytes()
-			defer buffer.Unmap()
-
-			for _, t := range tracks {
-				if err := t.WriteSample(media.Sample{
-					Data:     samples,
-					Duration: *buffer.Duration().AsDuration(),
-				}); err != nil {
-					// 忽略错误
-				}
-			}
-			return gst.FlowOK
-		},
-	})
-	log.Printf("✅ %s 管道运行中", codecName)
+        for {
+            if _, err := io.ReadFull(reader, header); err != nil {
+                if err == io.EOF {
+                    log.Printf("ℹ️ [Video] stdout 结束")
+                } else {
+                    log.Printf("❌ [Video] 读取头失败: %v", err)
+                }
+                break
+            }
+            frameLen := binary.BigEndian.Uint32(header[0:4])
+            tsNs := binary.BigEndian.Uint64(header[4:12])
+            if frameLen == 0 || frameLen > 2*1024*1024 {
+                log.Printf("⚠️ [Video] 异常帧长: %d", frameLen)
+                continue
+            }
+            frame := make([]byte, frameLen)
+            if _, err := io.ReadFull(reader, frame); err != nil {
+                log.Printf("❌ [Video] 读取帧失败: %v", err)
+                break
+            }
+            dur := time.Second / time.Duration(*defaultFPS)
+            if lastTs > 0 && tsNs > lastTs {
+                dur = time.Duration(tsNs - lastTs)
+            }
+            lastTs = tsNs
+            _ = videoTrack.WriteSample(media.Sample{Data: frame, Duration: dur})
+        }
+    }()
 }
 
-func startH264BridgeForwarder(videoTopic, controlTopic string, videoTrack *webrtc.TrackLocalStaticSample) {
-	log.Printf("🚀 启动 Python 双向桥接...")
+func startControlStreamForwarder(controlTopic string) {
+    log.Printf("🚀 启动 ROS2 控制接收器 (stdin -> ROS2)...")
 
-	rosPath, rosPathOk := os.LookupEnv("ROS_DISTRO")
-	if !rosPathOk || rosPath == "" {
-		log.Fatalf("❌ ROS2 环境未加载 (ROS_DISTRO 未设置). 请先 source /opt/ros/humble/setup.bash")
-	}
+    rosPath, rosPathOk := os.LookupEnv("ROS_DISTRO")
+    if !rosPathOk || rosPath == "" {
+        log.Fatalf("❌ ROS2 环境未加载 (ROS_DISTRO 未设置). 请先 source /opt/ros/humble/setup.bash")
+    }
 
-	exePath, err := os.Executable()
-	if err != nil {
-		log.Fatalf("❌ 无法获取当前执行路径: %v", err)
-	}
-	scriptPath := filepath.Join(filepath.Dir(exePath), "..", "scripts", "ros2_h264_stdout_bridge.py")
+    exePath, err := os.Executable()
+    if err != nil {
+        log.Fatalf("❌ 无法获取当前执行路径: %v", err)
+    }
+    scriptPath := filepath.Join(filepath.Dir(exePath), "..", "scripts", "shm_solution", "ros_control_stdin.py")
 
-	cmd := exec.Command("python3", scriptPath,
-		"--video-topic", videoTopic,
-		"--control-topic", controlTopic,
-	)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		log.Fatalf("❌ 创建 stdout 管道失败: %v", err)
-	}
-	pythonStdin, err = cmd.StdinPipe()
-	if err != nil {
-		log.Fatalf("❌ 创建 stdin 管道失败: %v", err)
-	}
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Start(); err != nil {
-		log.Fatalf("❌ 启动 Python 桥接失败: %v", err)
-	}
-	log.Printf("✅ Python 桥接已启动 (PID: %d)", cmd.Process.Pid)
-
-	go func() {
-		defer cmd.Process.Kill()
-		defer stdout.Close()
-		defer pythonStdin.Close()
-
-		reader := bufio.NewReader(stdout)
-		headerBuf := make([]byte, 12) // 4字节长度 + 8字节时间戳
-		var lastTimestampNs uint64
-
-		for {
-			_, err := io.ReadFull(reader, headerBuf)
-			if err != nil {
-				if err == io.EOF {
-					log.Printf("ℹ️ Python 桥接 stdout 关闭，退出读取循环。")
-				} else {
-					log.Printf("❌ 读取帧头部失败: %v", err)
-				}
-				break
-			}
-
-			frameLength := binary.BigEndian.Uint32(headerBuf[0:4])
-			timestampNs := binary.BigEndian.Uint64(headerBuf[4:12])
-
-			if frameLength > 2*1024*1024 { // 2MB sanity check
-				log.Printf("⚠️ 异常帧长度: %d, 跳过", frameLength)
-				continue
-			}
-
-			frameData := make([]byte, frameLength)
-			_, err = io.ReadFull(reader, frameData)
-			if err != nil {
-				log.Printf("❌ 读取帧数据失败: %v", err)
-				break
-			}
-
-			var duration time.Duration
-			if lastTimestampNs > 0 && timestampNs > lastTimestampNs {
-				duration = time.Duration(timestampNs - lastTimestampNs)
-			} else {
-				duration = time.Second / time.Duration(*defaultFPS)
-			}
-			lastTimestampNs = timestampNs
-
-			if err := videoTrack.WriteSample(media.Sample{Data: frameData, Duration: duration}); err != nil {
-				// 忽略错误
-			}
-		}
-	}()
+    cmd := exec.Command("python3", scriptPath, "--control-topic", controlTopic)
+    controlStdin, err = cmd.StdinPipe()
+    if err != nil {
+        log.Fatalf("❌ [Control] 创建 stdin 管道失败: %v", err)
+    }
+    cmd.Stderr = os.Stderr
+    if err := cmd.Start(); err != nil {
+        log.Fatalf("❌ [Control] 启动 ros_control_stdin.py 失败: %v", err)
+    }
+    log.Printf("✅ ROS2 控制器已启动 (PID: %d)", cmd.Process.Pid)
 }
 
 func publishControlToROS2(data []byte) {
-	if pythonStdin == nil {
+    if controlStdin == nil {
 		log.Printf("⚠️ 控制管道 (stdin) 未就绪")
 		return
 	}
 	msg := append(data, '\n')
-	_, err := pythonStdin.Write(msg)
+    _, err := controlStdin.Write(msg)
 	if err != nil {
 		log.Printf("❌ 写入控制指令到 stdin 失败: %v", err)
+		// 如果写入失败，可能是 Python 进程已退出，这里可以记录但不中断程序
 	}
 }

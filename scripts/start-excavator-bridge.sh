@@ -12,7 +12,7 @@ mkdir -p "$LOG_DIR"
 
 # 可配置参数
 SIGNALING_SERVER="${SIGNALING_SERVER:-ws://111.186.56.118:8090/ws}"
-ROS2_IMAGE_TOPIC="${ROS2_IMAGE_TOPIC:-/camera_front_wide}"
+ROS2_IMAGE_TOPIC="${ROS2_IMAGE_TOPIC:-/camera/image_h264}"
 
 LOG_FILE="$LOG_DIR/excavator-bridge.log"
 PID_FILE="$LOG_DIR/excavator.pid"

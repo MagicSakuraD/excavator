@@ -69,3 +69,6 @@ testdata/
 cpu.prof
 mem.prof
 
+# 归档文件
+scripts/_archived/
+

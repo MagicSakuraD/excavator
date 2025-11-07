@@ -1,27 +1,52 @@
 #!/bin/bash
+# Kills all related processes for the excavator project.
 
-# 停止所有相关进程
+echo "🛑 Stopping all excavator-related processes..."
 
-echo "🛑 停止所有 excavator 相关进程..."
-
-# 1. 停止 Go/Python 进程
-pkill -f "excavator" && echo "  ✅ 已停止 excavator 程序 (Go)" || echo "  ℹ️  excavator 程序未运行"
-pkill -f "ros2_h264_stdout_bridge.py" && echo "  ✅ 已停止 H264 stdout 桥接 (Python)" || echo "  ℹ️  H264 stdout 桥接未运行"
-pkill -f "ros2_h264_camera_publisher.py" && echo "  ✅ 已停止 H264 摄像头发布节点 (Python)" || echo "  ℹ️  H264 摄像头发布节点未运行"
-
-# 2. (关键) 强制释放摄像头资源
-# 查找并杀死所有占用 /dev/video0 的进程
-CAM_DEVICE="/dev/video0"
-PIDS_USING_CAM=$(fuser $CAM_DEVICE 2>/dev/null)
-
-if [ -n "$PIDS_USING_CAM" ]; then
-    echo "📹 发现有进程正在占用摄像头 $CAM_DEVICE (PIDs: $PIDS_USING_CAM)"
-    # -k: kill, -9: SIGKILL (强制)
-    fuser -k -9 $CAM_DEVICE 2>/dev/null
-    echo "  ✅ 已强制释放摄像头资源"
-else
-    echo "  ℹ️  摄像头 $CAM_DEVICE 未被占用"
+# --- Shared Memory Solution (Recommended) ---
+echo "  -> Stopping SHM to stdout encoder (shm_to_stdout.py)..."
+pkill -f "shm_to_stdout.py" || echo "     (not running)"
+if [ -f ../logs/shm_to_stdout.pid ]; then
+    rm ../logs/shm_to_stdout.pid
 fi
 
-echo "✅ 完成"
+echo "  -> Stopping ROS2 control stdin bridge (ros_control_stdin.py)..."
+pkill -f "ros_control_stdin.py" || echo "     (not running)"
+
+echo "  -> Stopping Shared Memory to H.264 Publisher (shm_to_h264_publisher.py)..."
+pkill -f "shm_to_h264_publisher.py" || echo "     (not running)"
+if [ -f ../logs/shm_to_h264.pid ]; then
+    rm ../logs/shm_to_h264.pid
+fi
+
+echo "  -> Stopping ROS to Shared Memory Bridge (ros_to_shm.py)..."
+pkill -f "ros_to_shm.py" || echo "     (not running)"
+if [ -f ../logs/ros_to_shm.pid ]; then
+    rm ../logs/ros_to_shm.pid
+fi
+
+# Clean up shared memory file
+echo "  -> Cleaning up shared memory..."
+rm -f /dev/shm/isaac_rgb_buffer
+
+# --- FFmpeg Solution (Backup) ---
+echo "  -> Stopping FFmpeg H.264 Publisher (ros2_ffmpeg_h264.py)..."
+pkill -f "ros2_ffmpeg_h264.py" || echo "     (not running)"
+if [ -f ../logs/ros2_ffmpeg_h264.pid ]; then
+    rm ../logs/ros2_ffmpeg_h264.pid
+fi
+
+# --- Original Processes from README ---
+echo "  -> Stopping Go WebRTC bridge (excavator)..."
+if [ -f ../logs/excavator.pid ]; then
+    kill $(cat ../logs/excavator.pid) 2>/dev/null || true
+    rm ../logs/excavator.pid
+else
+    pkill -f "excavator" || echo "     (not running)"
+fi
+
+echo "  -> Stopping physical camera publisher (ros2_h264_camera_publisher.py)..."
+pkill -f "ros2_h264_camera_publisher.py" || echo "     (not running)"
+
+echo "✅ Cleanup complete."
 
