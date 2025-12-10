@@ -13,6 +13,12 @@ fi
 echo "  -> Stopping ROS2 control stdin bridge (ros_control_stdin.py)..."
 pkill -f "ros_control_stdin.py" || echo "     (not running)"
 
+echo "  -> Stopping Audio Streamer (audio_streamer.py)..."
+pkill -f "audio_streamer.py" || echo "     (not running)"
+
+echo "  -> Stopping Audio Player (audio_player.py)..."
+pkill -f "audio_player.py" || echo "     (not running)"
+
 echo "  -> Stopping Shared Memory to H.264 Publisher (shm_to_h264_publisher.py)..."
 pkill -f "shm_to_h264_publisher.py" || echo "     (not running)"
 if [ -f ../logs/shm_to_h264.pid ]; then

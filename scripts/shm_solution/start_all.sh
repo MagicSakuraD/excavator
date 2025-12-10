@@ -50,7 +50,7 @@ fi
 # Step 3: Start Go WebRTC client (it will spawn shm_to_stdout.py automatically)
 echo ""
 echo "Step 3: Starting Go WebRTC client (signaling: $SIGNALING_URL) ..."
-"$BIN_PATH" -signaling "$SIGNALING_URL" >> "$LOG_DIR/go_webrtc.log" 2>&1 &
+"$BIN_PATH" -signaling "$SIGNALING_URL" -supabase-url "$SUPABASE_URL" -supabase-key "$SUPABASE_KEY" > "$LOG_DIR/go_webrtc.log" 2>&1 &
 GO_PID=$!
 echo "Go WebRTC client started with PID: $GO_PID (logs: $LOG_DIR/go_webrtc.log)"
 

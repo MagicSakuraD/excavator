@@ -7,6 +7,8 @@
 本方案采用**共享内存**作为数据传输通道，Go 作为 WebRTC 客户端，通过进程隔离实现了极致的稳定性和性能：
 
 - **视频流**: ROS2 → 共享内存 → GStreamer 硬编码 → Go → WebRTC → 浏览器
+- **音频流 (上行)**: USB 麦克风 → GStreamer Opus 编码 → UDP → Go → WebRTC → 浏览器
+- **音频流 (下行)**: 浏览器麦克风 → WebRTC → Go → UDP → GStreamer → 扬声器
 - **控制流**: 浏览器 → WebRTC → Go → ROS2 发布器 → ROS2 话题
 
 ```
@@ -51,8 +53,10 @@ Isaac Sim / ROS2 仿真
 - **✅ 硬件加速**: NVIDIA `nvh264enc` GPU 编码，CPU 占用低
 - **✅ 超低延迟**: 共享内存纳秒级数据传输，端到端延迟 ~20ms
 - **✅ 双向控制**: WebRTC DataChannel 实现浏览器 ↔ ROS2 实时控制
+- **✅ 双向语音**: USB 麦克风上传 + 接收控制端语音播放，Opus 编码，支持实时对讲
 - **✅ 动态分辨率**: 自动适配视频分辨率变化（支持拼接图像）
 - **✅ 高稳定性**: Go 主进程管理 Python 子进程，自动重启机制
+- **✅ 自动重连**: WebSocket 断开后自动重连信令服务器，支持指数退避
 - **✅ 易于部署**: 一键启动脚本，自动编译和环境检测
 
 ## 📦 部署与设置
@@ -155,7 +159,11 @@ sudo apt install python3-gi python3-gst-1.0 gir1.2-gst-1.0 gstreamer1.0-tools gs
 
 你需要**两个**终端来分别启动摄像头节点和主程序。
 
-### 终端 1: 启动 ROS2 摄像头发布节点
+### 步骤 1: 启动 Isaac Sim
+确保您的 Isaac Sim 仿真环境正在运行，并且正在发布 `sensor_msgs/Image` 类型的图像话题 (默认为 `/stitched_image`)。
+
+### 步骤 2: 启动桥接程序
+在一个终端中，执行以下命令来启动所有后端服务 (ROS->SHM, 音频采集, GStreamer 编码, Go WebRTC):
 
 ```bash
 # source ROS2 环境
@@ -163,23 +171,24 @@ source /opt/ros/humble/setup.bash
 
 cd /path/to/your/project/excavator/scripts
 
-# 启动摄像头发布脚本
-# 它会使用 v4l2 捕获摄像头，(硬/软)编码为 H.264，然后发布到 ROS2 话题
-./start-ros2-h264-camera.sh
+# 启动一体化脚本，并以参数形式传入信令服务器地址
+# 默认启用音频采集（使用系统默认 USB 麦克风）
+./start_all.sh wss://cyberc3-cloud-server.sjtu.edu.cn/ws
 ```
-> 脚本接受参数，例如: `./start-ros2-h264-camera.sh --device /dev/video1 --width 1280 --height 720`
 
-### 终端 2: 启动 Excavator 桥接程序
+**音频配置选项**（可选）：
+
+如果需要自定义音频设备或禁用音频，可以修改 Go 程序的启动参数：
 
 ```bash
-# source ROS2 环境
-source /opt/ros/humble/setup.bash
+# 禁用音频
+./bin/excavator -signaling wss://... -enable-audio=false
 
-cd /path/to/your/project/excavator/scripts
+# 指定音频设备
+./bin/excavator -signaling wss://... -audio-device "alsa_input.usb-..."
 
-# 启动主程序脚本
-# 它会编译并运行 Go 程序，Go 程序会自动启动 Python 桥接子进程
-./start-excavator-bridge.sh
+# 调整音频比特率（默认 32kbps）
+./bin/excavator -signaling wss://... -audio-bitrate 64000
 ```
 > 你可以修改脚本内的 `SIGNALING_SERVER` 变量，或通过环境变量来覆盖它。
 

@@ -8,6 +8,7 @@ import (
     "fmt"
     "io"
     "log"
+    "net"
     "os"
     "os/exec"
     "path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
+	// "github.com/supabase-community/supabase-go"
 )
 
 type SignalingMessage struct {
@@ -26,19 +28,35 @@ type SignalingMessage struct {
 }
 
 var (
-	signalingURL = flag.String("signaling", "ws://localhost:8090/ws", "信令服务器地址")
+	signalingURL = flag.String("signaling", "wss://cyberc3-cloud-server.sjtu.edu.cn/ws", "信令服务器地址")
 	// 视频源固定为 ROS2 Bridge，不再需要本地摄像头参数
 	ros2ImageTopic   = flag.String("ros2-image-topic", "/camera_front_wide", "ROS2 视频话题")
 	ros2ControlTopic = flag.String("ros2-control-topic", "/controls/teleop", "ROS2 控制话题")
 	defaultFPS       = flag.Int("default-fps", 30, "在无法计算时间戳时的默认视频帧率")
 
+	// 音频配置
+	enableAudio       = flag.Bool("enable-audio", true, "是否启用音频采集")
+	audioDevice       = flag.String("audio-device", "", "音频设备名称（空值使用系统默认）")
+	audioBitrate      = flag.Int("audio-bitrate", 32000, "Opus 音频比特率 (bps)")
+	audioUDPPort      = flag.Int("audio-udp-port", 5004, "音频采集 RTP UDP 端口")
+	audioPlaybackPort = flag.Int("audio-playback-port", 5005, "音频播放 RTP UDP 端口")
+
+	// Supabase 配置
+	supabaseURL = flag.String("supabase-url", "", "Supabase URL")
+	supabaseKey = flag.String("supabase-key", "", "Supabase Service Key")
+
 	peerConnection *webrtc.PeerConnection
 )
 
 var (
-	videoTrack  *webrtc.TrackLocalStaticSample
-	audioTrack  *webrtc.TrackLocalStaticSample
-    controlStdin io.WriteCloser
+	videoTrack        *webrtc.TrackLocalStaticSample
+	audioTrack        *webrtc.TrackLocalStaticRTP
+	controlStdin      io.WriteCloser
+	audioPlaybackConn net.Conn // UDP 连接，用于发送接收到的音频到播放器
+	
+	// 重连配置
+	reconnectBaseDelay = 2 * time.Second
+	reconnectMaxDelay  = 60 * time.Second
 )
 
 func main() {
@@ -46,27 +64,16 @@ func main() {
 
 	log.SetFlags(log.Ltime | log.Lshortfile)
 
-	log.Printf("🚀 挖掘机端启动 (精简版)...")
-	log.Printf("📡 连接信令服务器: %s", *signalingURL)
+	log.Printf("🚀 挖掘机端启动 (支持自动重连)...")
 
-	// 连接信令服务器
-	conn, _, err := websocket.DefaultDialer.Dial(*signalingURL, nil)
-	if err != nil {
-		log.Fatalf("❌ 连接信令服务器失败: %v", err)
-	}
-	defer conn.Close()
+	// 初始化 Supabase 并启动心跳
+	// initSupabase()
+	// startHeartbeat()
 
-	// 注册为 excavator
-	registerMsg := map[string]string{
-		"type":     "register",
-		"identity": "excavator",
-	}
-	if err := conn.WriteJSON(registerMsg); err != nil {
-		log.Fatalf("❌ 注册失败: %v", err)
-	}
-	log.Printf("✅ 已注册为 excavator")
+	// ====== 一次性初始化：轨道和子进程 ======
+	var err error
 
-	// 提前创建轨道
+	// 提前创建轨道 (只创建一次，可复用)
 	videoTrack, err = webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{MimeType: "video/h264"},
 		"video",
@@ -76,8 +83,9 @@ func main() {
 		log.Fatalf("❌ 创建视频轨道失败: %v", err)
 	}
 
-	audioTrack, err = webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: "audio/opus"},
+	// 创建音频轨道 (使用 RTP 类型，因为 GStreamer 已经打包好 RTP)
+	audioTrack, err = webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
 		"audio",
 		"excavator-audio",
 	)
@@ -85,31 +93,112 @@ func main() {
 		log.Fatalf("❌ 创建音频轨道失败: %v", err)
 	}
 
-    // 启动视频编码器 (SHM -> GStreamer -> stdout)
-    go startVideoStreamForwarder(videoTrack)
+	// 启动视频编码器 (SHM -> GStreamer -> stdout)
+	go startVideoStreamForwarder(videoTrack)
 
-    // 启动控制转发器 (stdin -> ROS2)
-    go startControlStreamForwarder(*ros2ControlTopic)
+	// 启动音频采集和转发 (USB Mic -> GStreamer -> UDP -> audioTrack)
+	if *enableAudio {
+		go startAudioStreamer(*audioDevice, *audioBitrate, *audioUDPPort)
+		go startAudioStreamForwarder(audioTrack, *audioUDPPort)
+		// 启动音频播放器 (接收来自控制端的语音)
+		go startAudioPlayer(*audioPlaybackPort)
+	}
 
-	log.Printf("⏳ 等待控制端连接...")
+	// 启动控制转发器 (stdin -> ROS2)
+	go startControlStreamForwarder(*ros2ControlTopic)
 
-	// 处理信令消息 (阻塞)
-	handleSignaling(conn)
+	// ====== 无限重连循环 ======
+	reconnectDelay := reconnectBaseDelay
+	consecutiveFailures := 0
 
-	// 保持运行
-	select {}
+	for {
+		log.Printf("📡 正在连接信令服务器: %s", *signalingURL)
+		
+		connected, err := connectAndServe(*signalingURL)
+		
+		if err != nil {
+			log.Printf("❌ 连接断开: %v", err)
+		}
+
+		// 清理旧的 PeerConnection
+		if peerConnection != nil {
+			peerConnection.Close()
+			peerConnection = nil
+		}
+
+		// 如果曾经成功连接过，重置退避延迟
+		if connected {
+			reconnectDelay = reconnectBaseDelay
+			consecutiveFailures = 0
+			log.Printf("🔄 连接已断开，立即重连...")
+		} else {
+			consecutiveFailures++
+			log.Printf("🔄 连接失败 (第 %d 次)，%v 后重连...", consecutiveFailures, reconnectDelay)
+			time.Sleep(reconnectDelay)
+
+			// 指数退避，但不超过最大值
+			reconnectDelay = reconnectDelay * 2
+			if reconnectDelay > reconnectMaxDelay {
+				reconnectDelay = reconnectMaxDelay
+			}
+		}
+	}
 }
 
-func handleSignaling(conn *websocket.Conn) {
+// connectAndServe 连接到信令服务器并处理消息，直到连接断开
+// 返回: (是否曾成功连接, 错误)
+func connectAndServe(signalingURL string) (bool, error) {
+	// 连接信令服务器
+	conn, _, err := websocket.DefaultDialer.Dial(signalingURL, nil)
+	if err != nil {
+		return false, fmt.Errorf("连接信令服务器失败: %w", err)
+	}
+	defer conn.Close()
+
+	// 注册为 excavator
+	registerMsg := map[string]string{
+		"type":     "register",
+		"identity": "excavator",
+	}
+	if err := conn.WriteJSON(registerMsg); err != nil {
+		return false, fmt.Errorf("注册失败: %w", err)
+	}
+	log.Printf("✅ 已注册为 excavator")
+	log.Printf("⏳ 等待控制端连接...")
+
+	// 启动 WebSocket 心跳保活 (在独立 goroutine 中)
+	stopHeartbeat := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopHeartbeat:
+				return
+			case <-ticker.C:
+				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					log.Printf("⚠️ 发送 WebSocket Ping 失败: %v", err)
+					return
+				}
+			}
+		}
+	}()
+	defer close(stopHeartbeat)
+
+	// 处理信令消息 (阻塞，直到连接断开)
+	// 返回 true 表示曾经成功连接过
+	return true, handleSignaling(conn)
+}
+
+func handleSignaling(conn *websocket.Conn) error {
 	for {
 		var msg SignalingMessage
 		if err := conn.ReadJSON(&msg); err != nil {
-			log.Printf("❌ 读取信令消息失败: %v", err)
 			if peerConnection != nil {
 				peerConnection.Close()
 				peerConnection = nil
 			}
-			return
+			return fmt.Errorf("读取信令消息失败: %w", err)
 		}
 
 		// log.Printf("📨 收到信令: %s (来自 %s)", msg.Type, msg.From) // 调试时取消注释
@@ -244,6 +333,16 @@ func createPeerConnection(conn *websocket.Conn) (*webrtc.PeerConnection, error) 
 		})
 	})
 
+	// 处理接收到的远程音频轨道 (来自控制端的麦克风)
+	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		log.Printf("🎧 收到远程轨道: %s (类型: %s)", track.ID(), track.Kind().String())
+
+		if track.Kind() == webrtc.RTPCodecTypeAudio {
+			log.Printf("🔊 开始接收控制端音频...")
+			go forwardRemoteAudioToPlayer(track)
+		}
+	})
+
 	if _, err = pc.AddTrack(videoTrack); err != nil {
 		return nil, fmt.Errorf("❌ 添加视频轨道失败: %w", err)
 	}
@@ -349,4 +448,203 @@ func publishControlToROS2(data []byte) {
 		log.Printf("❌ 写入控制指令到 stdin 失败: %v", err)
 		// 如果写入失败，可能是 Python 进程已退出，这里可以记录但不中断程序
 	}
+}
+
+// --- Supabase Integration ---
+
+// const DeviceSN = "1421323042255"
+
+// func initSupabase() {
+// 	if *supabaseURL == "" || *supabaseKey == "" {
+// 		log.Println("⚠️ 未提供 Supabase URL 或 Key，跳过 Supabase 初始化。")
+// 		return
+// 	}
+
+// 	var err error
+// 	// 使用 supabase-community/supabase-go 初始化客户端
+// 	supabaseClient, err = supabase.NewClient(*supabaseURL, *supabaseKey, nil)
+// 	if err != nil {
+// 		log.Fatalf("❌ 初始化 Supabase 客户端失败: %v", err)
+// 	}
+// 	log.Println("✅ Supabase 客户端初始化成功")
+// }
+
+// func startHeartbeat() {
+// 	if supabaseClient == nil {
+// 		return
+// 	}
+
+// 	// 1. 上线状态更新
+// 	log.Printf("🔄 正在更新设备状态为 online (SN: %s)...", DeviceSN)
+	
+// 	// 构造更新数据
+// 	// 注意：Supabase Go 库的 Update 方法签名可能因版本而异，这里假设遵循 postgrest-go 风格
+// 	payload := map[string]interface{}{
+// 		"status":     "online",
+// 		"ip_address": "192.168.3.57", // 真实 IP
+// 		"last_seen":  time.Now().Format(time.RFC3339),
+// 	}
+
+// 	// 执行更新: UPDATE excavators SET ... WHERE serial_sn = DeviceSN
+// 	// Update(data, count, returnRepresentation)
+// 	_, _, err := supabaseClient.From("excavators").Update(payload, "", "").Eq("serial_sn", DeviceSN).Execute()
+// 	if err != nil {
+// 		log.Printf("❌ 更新上线状态失败: %v (请检查表 excavators 是否存在且包含 serial_sn=%s)", err, DeviceSN)
+// 	} else {
+// 		log.Println("✅ 设备状态已更新为 Online")
+// 	}
+
+// 	// 2. 开启心跳循环 (每 10 秒)
+// 	go func() {
+// 		ticker := time.NewTicker(10 * time.Second)
+// 		defer ticker.Stop()
+
+// 		for range ticker.C {
+// 			hbPayload := map[string]interface{}{
+// 				"last_seen": time.Now().Format(time.RFC3339),
+// 			}
+// 			_, _, err := supabaseClient.From("excavators").Update(hbPayload, "", "").Eq("serial_sn", DeviceSN).Execute()
+// 			if err != nil {
+// 				log.Printf("❌ 心跳发送失败: %v", err)
+// 			} else {
+// 				// log.Printf("💓 心跳发送成功") // 减少日志噪音，可选开启
+// 			}
+// 		}
+// 	}()
+// }
+
+// --- Audio Streaming Functions ---
+
+func startAudioStreamer(deviceName string, bitrate int, udpPort int) {
+    log.Printf("🎤 启动音频采集器 (USB Mic -> GStreamer -> UDP)...")
+
+    exePath, err := os.Executable()
+    if err != nil {
+        log.Fatalf("❌ 无法获取当前执行路径: %v", err)
+    }
+    scriptPath := filepath.Join(filepath.Dir(exePath), "..", "scripts", "shm_solution", "audio_streamer.py")
+
+    args := []string{scriptPath}
+    if deviceName != "" {
+        args = append(args, "--device", deviceName)
+    }
+    args = append(args, "--bitrate", fmt.Sprintf("%d", bitrate))
+    args = append(args, "--port", fmt.Sprintf("%d", udpPort))
+
+    cmd := exec.Command("python3", args...)
+    cmd.Stderr = os.Stderr
+    cmd.Stdout = os.Stdout
+
+    if err := cmd.Start(); err != nil {
+        log.Printf("❌ [Audio] 启动 audio_streamer.py 失败: %v", err)
+        return
+    }
+    log.Printf("✅ 音频采集器已启动 (PID: %d)", cmd.Process.Pid)
+
+    // 监控进程
+    go func() {
+        if err := cmd.Wait(); err != nil {
+            log.Printf("⚠️ [Audio] audio_streamer.py 退出: %v", err)
+        }
+    }()
+}
+
+func startAudioStreamForwarder(audioTrack *webrtc.TrackLocalStaticRTP, udpPort int) {
+    log.Printf("🔊 启动音频 UDP 接收器 (端口: %d)...", udpPort)
+
+    // 监听本地 UDP 端口
+    addr := fmt.Sprintf("127.0.0.1:%d", udpPort)
+    listener, err := net.ListenPacket("udp", addr)
+    if err != nil {
+        log.Printf("❌ [Audio] UDP 监听失败: %v", err)
+        return
+    }
+    defer listener.Close()
+
+    log.Printf("✅ 音频 UDP 接收器已启动")
+
+    buffer := make([]byte, 1500) // MTU size usually < 1500
+
+    for {
+        n, _, err := listener.ReadFrom(buffer)
+        if err != nil {
+            log.Printf("❌ [Audio] UDP 读取错误: %v", err)
+            continue
+        }
+
+        // 直接把收到的 RTP 包写给 WebRTC Audio Track
+        if _, err := audioTrack.Write(buffer[:n]); err != nil {
+            if err == io.EOF {
+                log.Printf("ℹ️ [Audio] Audio Track 已关闭")
+                return
+            }
+            // log.Printf("⚠️ [Audio] Track 写入错误: %v", err) // 可能会很嘈杂，按需取消注释
+        }
+	}
+}
+
+// --- Audio Playback Functions (接收控制端语音) ---
+
+func startAudioPlayer(udpPort int) {
+    log.Printf("🔈 启动音频播放器 (UDP -> GStreamer -> 扬声器)...")
+
+    exePath, err := os.Executable()
+    if err != nil {
+        log.Printf("❌ 无法获取当前执行路径: %v", err)
+        return
+    }
+    scriptPath := filepath.Join(filepath.Dir(exePath), "..", "scripts", "shm_solution", "audio_player.py")
+
+    cmd := exec.Command("python3", scriptPath, "--port", fmt.Sprintf("%d", udpPort))
+    cmd.Stderr = os.Stderr
+    cmd.Stdout = os.Stdout
+
+    if err := cmd.Start(); err != nil {
+        log.Printf("❌ [AudioPlayer] 启动 audio_player.py 失败: %v", err)
+        return
+    }
+    log.Printf("✅ 音频播放器已启动 (PID: %d)", cmd.Process.Pid)
+
+    // 建立 UDP 连接用于发送音频数据
+    addr := fmt.Sprintf("127.0.0.1:%d", udpPort)
+    conn, err := net.Dial("udp", addr)
+    if err != nil {
+        log.Printf("❌ [AudioPlayer] UDP 连接失败: %v", err)
+        return
+    }
+    audioPlaybackConn = conn
+    log.Printf("✅ 音频播放 UDP 连接已建立 (目标: %s)", addr)
+
+    // 监控进程
+    go func() {
+        if err := cmd.Wait(); err != nil {
+            log.Printf("⚠️ [AudioPlayer] audio_player.py 退出: %v", err)
+        }
+        if audioPlaybackConn != nil {
+            audioPlaybackConn.Close()
+            audioPlaybackConn = nil
+        }
+    }()
+}
+
+func forwardRemoteAudioToPlayer(track *webrtc.TrackRemote) {
+    buffer := make([]byte, 1500)
+
+    for {
+        n, _, err := track.Read(buffer)
+        if err != nil {
+            if err == io.EOF {
+                log.Printf("ℹ️ [AudioPlayer] 远程音频轨道已关闭")
+            } else {
+                log.Printf("❌ [AudioPlayer] 读取远程音频失败: %v", err)
+            }
+            return
+        }
+
+        if audioPlaybackConn != nil {
+            if _, err := audioPlaybackConn.Write(buffer[:n]); err != nil {
+                log.Printf("⚠️ [AudioPlayer] UDP 发送失败: %v", err)
+            }
+        }
+    }
 }
