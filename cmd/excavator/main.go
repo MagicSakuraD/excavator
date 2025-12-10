@@ -28,7 +28,7 @@ type SignalingMessage struct {
 }
 
 var (
-	signalingURL = flag.String("signaling", "wss://cyberc3-cloud-server.sjtu.edu.cn/ws", "信令服务器地址")
+	signalingURL = flag.String("signaling", "ws://192.168.3.41/ws", "信令服务器地址")
 	// 视频源固定为 ROS2 Bridge，不再需要本地摄像头参数
 	ros2ImageTopic   = flag.String("ros2-image-topic", "/camera_front_wide", "ROS2 视频话题")
 	ros2ControlTopic = flag.String("ros2-control-topic", "/controls/teleop", "ROS2 控制话题")

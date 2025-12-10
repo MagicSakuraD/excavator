@@ -35,6 +35,13 @@ fi
 # Step 1: Start ROS2 to SHM bridge first
 echo ""
 echo "Step 1: Starting ROS2 -> Shared Memory Bridge..."
+if [ "$INPUT_FORMAT" == "I420" ]; then
+    echo "  [CONFIG] Using I420 format for SHM bridge"
+    # 这里我们通过环境变量透传给 start_ros_to_shm.sh，或者假设该脚本会读取它
+    # 或者直接在该脚本中增加参数处理。为了简单起见，我们假设用户已经修改了 underlying 的启动逻辑
+    # 更好的做法是让 start_ros_to_shm.sh 接受参数
+    export ROS_ARGS="-p input_format:=I420"
+fi
 "$SCRIPT_DIR/start_ros_to_shm.sh"
 sleep 2
 

@@ -210,7 +210,7 @@ appsink
 3. **集成测试**：
    ```bash
    # 启动完整系统（包含音频）
-   ./start_all.sh wss://cyberc3-cloud-server.sjtu.edu.cn/ws
+   ./start_all.sh ws://192.168.3.41/ws
    
    # 在浏览器中检查音频是否正常
    ```

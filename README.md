@@ -173,7 +173,20 @@ cd /path/to/your/project/excavator/scripts
 
 # 启动一体化脚本，并以参数形式传入信令服务器地址
 # 默认启用音频采集（使用系统默认 USB 麦克风）
-./start_all.sh wss://cyberc3-cloud-server.sjtu.edu.cn/ws
+./start_all.sh ws://192.168.3.41/ws
+```
+
+### 真实设备 (I420 摄像头)
+
+如果您的摄像头输出 `I420` 或 `NV12` 格式（非 RGB8），请在启动前设置环境变量：
+
+```bash
+# 1. 确保 ROS2 节点也以 I420 模式启动 (在 scripts/start_ros_to_shm.sh 中修改参数或使用 ros-args)
+#    ros2 run ... --ros-args -p input_format:=I420 ...
+
+# 2. 启动脚本时指定格式
+export INPUT_FORMAT=I420
+./start_all.sh ws://192.168.3.41/ws
 ```
 
 **音频配置选项**（可选）：
