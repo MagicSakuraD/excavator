@@ -76,12 +76,12 @@ Isaac Sim / ROS2 仿真
 
 #### 1. 安装 GStreamer 依赖
 
-JetPack 通常已包含所有必要的 GStreamer 插件 (`nvidia-l4t-gstreamer`)。如果缺失，请安装：
+JetPack 5.x/6.x (Orin/Xavier) 通常已包含所有必要的 GStreamer 插件。如果缺失，请安装：
 ```bash
 sudo apt update
 sudo apt install python3-gi python3-gst-1.0 gir1.2-gst-1.0 gstreamer1.0-tools gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
 ```
-验证硬件编码器是否存在：
+验证硬件编码器是否存在（JetPack 5/6 使用 `nvv4l2h264enc`）：
 ```bash
 gst-inspect-1.0 nvv4l2h264enc
 ```
@@ -169,25 +169,34 @@ sudo apt install python3-gi python3-gst-1.0 gir1.2-gst-1.0 gstreamer1.0-tools gs
 # source ROS2 环境
 source /opt/ros/humble/setup.bash
 
-cd /path/to/your/project/excavator/scripts
+cd ~/code_ws/src/RemoteExcavator/webrtc_excavator/scripts/shm_solution
 
 # 启动一体化脚本，并以参数形式传入信令服务器地址
+# 默认使用 I420 格式。如果您的摄像头输出 RGB，请 export INPUT_FORMAT=RGB
 # 默认启用音频采集（使用系统默认 USB 麦克风）
-./start_all.sh ws://192.168.3.41/ws
+./start_all.sh ws://192.168.0.87:8090/ws
 ```
 
 ### 真实设备 (I420 摄像头)
 
-如果您的摄像头输出 `I420` 或 `NV12` 格式（非 RGB8），请在启动前设置环境变量：
+本方案默认使用 `I420` 格式。如果您的摄像头输出 `RGB` 格式，请在启动前设置环境变量：
 
 ```bash
-# 1. 确保 ROS2 节点也以 I420 模式启动 (在 scripts/start_ros_to_shm.sh 中修改参数或使用 ros-args)
-#    ros2 run ... --ros-args -p input_format:=I420 ...
-
-# 2. 启动脚本时指定格式
-export INPUT_FORMAT=I420
-./start_all.sh ws://192.168.3.41/ws
+# 启动脚本时指定格式为 RGB
+export INPUT_FORMAT=RGB
+./start_all.sh ws://192.168.0.87:8090/ws
 ```
+
+### 1080p 及动态分辨率支持
+
+本项目完全支持 **1080p** 及其他分辨率，且支持**动态分辨率切换**。
+- `ros_to_shm.py` 会自动检测输入话题的分辨率并调整共享内存大小。
+- `shm_to_stdout.py` 会自动监测共享内存的分辨率变化并重启编码管线。
+- 对于 1080p 视频，建议适当提高码率：
+  ```bash
+  export BITRATE_KBPS=8000  # 8Mbps
+  ./start_all.sh ...
+  ```
 
 **音频配置选项**（可选）：
 
@@ -211,12 +220,14 @@ export INPUT_FORMAT=I420
 
 ### (可选) 终端 3: 查看日志
 
-```bash
-# 查看 Go 主程序和 Python 桥接的日志
-tail -f /path/to/your/project/excavator/logs/excavator-bridge.log
+日志现在位于项目根目录的 `logs/` 文件夹下：
 
-# 查看摄像头发布节点的日志
-tail -f /path/to/your/project/excavator/logs/ros2-h264-camera.log
+```bash
+# 查看 ROS2 到共享内存桥接的日志
+tail -f ~/code_ws/src/RemoteExcavator/webrtc_excavator/logs/ros_to_shm.log
+
+# 查看 Go 主程序（含编码器）的日志
+tail -f ~/code_ws/src/RemoteExcavator/webrtc_excavator/logs/go_webrtc.log
 ```
 
 ## 🛑 停止所有进程

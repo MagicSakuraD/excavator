@@ -24,7 +24,7 @@ class ShmToStdout:
                  height: int = 720,
                  fps: int = 20,
                  bitrate_kbps: int = 4000,
-                 input_format: str = 'RGB'):
+                 input_format: str = 'I420'):
         self.shm_path = shm_path
         self.width = width
         self.height = height
@@ -121,13 +121,25 @@ class ShmToStdout:
         print(f'[INF] Reopened SHM for {self.width}x{self.height}', file=sys.stderr, flush=True)
 
     def _pipeline_str(self):
+        # Jetson Orin (JetPack 6.0) Hardware Encoding Pipeline
+        # Uses nvv4l2h264enc (V4L2 H.264 Encoder)
+        
+        # Pipeline steps:
+        # 1. appsrc: Pushes raw data from CPU memory
+        # 2. videoconvert: Ensures format compatibility (CPU side)
+        # 3. nvvidconv: Copies data to NVMM (GPU memory) and converts to NV12
+        # 4. nvv4l2h264enc: Hardware encoding
+        # 5. h264parse: Parses into stream format
+        
         return (
             f"appsrc name=appsrc is-live=true format=time do-timestamp=false block=true ! "
             f"video/x-raw,format={self.input_format},width={self.width},height={self.height},framerate={self.fps}/1,interlace-mode=progressive,pixel-aspect-ratio=1/1 ! "
             f"videoconvert ! "
-            f"video/x-raw,format=I420,width={self.width},height={self.height},framerate={self.fps}/1,interlace-mode=progressive,pixel-aspect-ratio=1/1 ! "
-            f"nvh264enc bitrate={self.bitrate_kbps} preset=low-latency-hq rc-mode=cbr-ld-hq gop-size={self.fps} ! "
-            f"video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline ! "
+            f"video/x-raw,format=I420,width={self.width},height={self.height},framerate={self.fps}/1 ! "
+            f"nvvidconv ! "
+            f"video/x-raw(memory:NVMM),format=NV12 ! "
+            f"nvv4l2h264enc bitrate={int(self.bitrate_kbps*1000)} preset-level=1 insert-sps-pps=true idrinterval={self.fps} iframeinterval={self.fps} ! "
+            f"video/x-h264,stream-format=byte-stream,alignment=au ! "
             f"h264parse config-interval=-1 ! "
             f"appsink name=sink emit-signals=true max-buffers=5 drop=true sync=false"
         )
@@ -258,7 +270,7 @@ def main():
     height = int(os.environ.get('HEIGHT', '720'))
     fps = int(os.environ.get('FPS', '20'))
     bitrate_kbps = int(os.environ.get('BITRATE_KBPS', '4000'))
-    input_format = os.environ.get('INPUT_FORMAT', 'RGB')
+    input_format = os.environ.get('INPUT_FORMAT', 'I420')
 
     app = ShmToStdout(shm_path, width, height, fps, bitrate_kbps, input_format)
     loop = GLib.MainLoop()

@@ -116,15 +116,16 @@ Isaac Sim (1280x720 RGB @ 20fps)
 
 ```bash
 # 进入脚本目录
-cd ~/code_ws/excavator/scripts/shm_solution
+cd ~/code_ws/src/RemoteExcavator/webrtc_excavator/scripts/shm_solution
 
 # 启动 ROS→SHM 桥接（仅一次）
+# 默认使用 I420 格式。如果您的摄像头输出 RGB，请 export INPUT_FORMAT=RGB
 ./start_ros_to_shm.sh
 ```
 
 ```bash
 # 在项目根目录编译并启动 WebRTC 客户端（指向云端信令）
-cd ~/code_ws/excavator
+cd ~/code_ws/src/RemoteExcavator/webrtc_excavator
 go build -o bin/excavator ./cmd/excavator
 ./bin/excavator -signaling ws://111.186.56.118:8090/ws
 ```
@@ -138,24 +139,27 @@ go build -o bin/excavator ./cmd/excavator
 ### 分步启动（用于调试）
 
 ```bash
-# 步骤 1: 启动 ROS2 到共享内存桥接
+# 步骤 1: 启动 ROS2 到共享内存桥接 (默认 I420)
 ./start_ros_to_shm.sh
 
 # 等待 2 秒，让共享内存文件创建完成
 sleep 2
 
 # 步骤 2: 启动共享内存到 H.264 发布器
+# 注意：这通常由 Go 客户端自动启动，仅调试时手动运行
 ./start_shm_to_h264.sh
 ```
 
 ### 监控日志
 
+日志现在位于项目根目录的 `logs/` 文件夹下：
+
 ```bash
 # 监控 ROS2 到共享内存桥接的日志
-tail -f ~/code_ws/excavator/logs/ros_to_shm.log
+tail -f ~/code_ws/src/RemoteExcavator/webrtc_excavator/logs/ros_to_shm.log
 
-# 监控共享内存到 H.264（stdout）编码器的日志
-tail -f ~/code_ws/excavator/logs/shm_to_stdout.log
+# 监控 Go WebRTC 客户端（含编码器输出）的日志
+tail -f ~/code_ws/src/RemoteExcavator/webrtc_excavator/logs/go_webrtc.log
 ```
 
 ### 检查状态

@@ -17,12 +17,12 @@ echo "=========================================="
 echo "Starting Excavator-side (ROS->SHM + WebRTC Client)"
 echo "=========================================="
 
-LOG_DIR=~/code_ws/excavator/logs
-mkdir -p "$LOG_DIR"
-
 # Resolve project root and binary path
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BIN_PATH="$PROJECT_ROOT/bin/excavator"
+
+LOG_DIR="$PROJECT_ROOT/logs"
+mkdir -p "$LOG_DIR"
 
 # Read signaling URL from first argument or env SIGNALING_URL
 SIGNALING_URL="${1:-${SIGNALING_URL}}"
@@ -35,12 +35,11 @@ fi
 # Step 1: Start ROS2 to SHM bridge first
 echo ""
 echo "Step 1: Starting ROS2 -> Shared Memory Bridge..."
-if [ "$INPUT_FORMAT" == "I420" ]; then
-    echo "  [CONFIG] Using I420 format for SHM bridge"
-    # 这里我们通过环境变量透传给 start_ros_to_shm.sh，或者假设该脚本会读取它
-    # 或者直接在该脚本中增加参数处理。为了简单起见，我们假设用户已经修改了 underlying 的启动逻辑
-    # 更好的做法是让 start_ros_to_shm.sh 接受参数
-    export ROS_ARGS="-p input_format:=I420"
+if [ "$INPUT_FORMAT" == "RGB" ]; then
+    echo "  [CONFIG] Using RGB format for SHM bridge"
+    export ROS_ARGS="-p input_format:=RGB"
+else
+    echo "  [CONFIG] Using default I420 format for SHM bridge"
 fi
 "$SCRIPT_DIR/start_ros_to_shm.sh"
 sleep 2
@@ -67,8 +66,8 @@ echo "All components started! (ROS->SHM + Go WebRTC client)"
 echo "=========================================="
 echo ""
 echo "Monitor logs with:"
-echo "  tail -f ~/code_ws/excavator/logs/ros_to_shm.log"
-echo "  tail -f ~/code_ws/excavator/logs/go_webrtc.log"
+echo "  tail -f $LOG_DIR/ros_to_shm.log"
+echo "  tail -f $LOG_DIR/go_webrtc.log"
 echo ""
 echo "Check status:"
 echo "  ros2 topic list"
