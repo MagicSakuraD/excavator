@@ -12,6 +12,7 @@ import (
     "os"
     "os/exec"
     "path/filepath"
+    "sync"
     "time"
 
 	"github.com/gorilla/websocket"
@@ -28,9 +29,9 @@ type SignalingMessage struct {
 }
 
 var (
-	signalingURL = flag.String("signaling", "wss://cyberc3-cloud-server.sjtu.edu.cn/ws", "信令服务器地址")
+	signalingURL = flag.String("signaling", "ws://192.168.124.3:8090/ws", "信令服务器地址")
 	// 视频源固定为 ROS2 Bridge，不再需要本地摄像头参数
-	ros2ImageTopic   = flag.String("ros2-image-topic", "/camera_front_wide", "ROS2 视频话题")
+	ros2ImageTopic   = flag.String("ros2-image-topic", "/stitched_image", "ROS2 视频话题")
 	ros2ControlTopic = flag.String("ros2-control-topic", "/controls/teleop", "ROS2 控制话题")
 	defaultFPS       = flag.Int("default-fps", 30, "在无法计算时间戳时的默认视频帧率")
 
@@ -46,6 +47,8 @@ var (
 	supabaseKey = flag.String("supabase-key", "", "Supabase Service Key")
 
 	peerConnection *webrtc.PeerConnection
+	// 保护对 WebSocket 连接的写操作，避免 concurrent write panic
+	wsWriteMu sync.Mutex
 )
 
 var (
@@ -160,7 +163,10 @@ func connectAndServe(signalingURL string) (bool, error) {
 		"type":     "register",
 		"identity": "excavator",
 	}
-	if err := conn.WriteJSON(registerMsg); err != nil {
+	wsWriteMu.Lock()
+	err = conn.WriteJSON(registerMsg)
+	wsWriteMu.Unlock()
+	if err != nil {
 		return false, fmt.Errorf("注册失败: %w", err)
 	}
 	log.Printf("✅ 已注册为 excavator")
@@ -176,7 +182,10 @@ func connectAndServe(signalingURL string) (bool, error) {
 			case <-stopHeartbeat:
 				return
 			case <-ticker.C:
-				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				wsWriteMu.Lock()
+				err := conn.WriteMessage(websocket.PingMessage, nil)
+				wsWriteMu.Unlock()
+				if err != nil {
 					log.Printf("⚠️ 发送 WebSocket Ping 失败: %v", err)
 					return
 				}
@@ -249,7 +258,10 @@ func handleSignaling(conn *websocket.Conn) error {
 				Payload: answerData,
 			}
 
-			if err := conn.WriteJSON(answerMsg); err != nil {
+			wsWriteMu.Lock()
+			err = conn.WriteJSON(answerMsg)
+			wsWriteMu.Unlock()
+			if err != nil {
 				log.Printf("❌ 发送 Answer 失败: %v", err)
 			} else {
 				log.Printf("✅ Answer 已发送")
@@ -308,7 +320,10 @@ func createPeerConnection(conn *websocket.Conn) (*webrtc.PeerConnection, error) 
 			Payload: candidateData,
 		}
 
-		if err := conn.WriteJSON(candidateMsg); err != nil {
+		wsWriteMu.Lock()
+		err = conn.WriteJSON(candidateMsg)
+		wsWriteMu.Unlock()
+		if err != nil {
 			log.Printf("❌ 发送 ICE 候选失败: %v", err)
 		}
 	})
