@@ -37,8 +37,8 @@ python3 "$SCRIPT_DIR/ros_to_shm.py" \
     --ros-args \
     -p input_topic:=/stitched_image \
     -p shm_path:=/dev/shm/isaac_rgb_buffer \
-    -p width:=1280 \
-    -p height:=720 \
+    -p width:=1920 \
+    -p height:=1080 \
     ${ROS_ARGS} \
     > "$LOG_FILE" 2>&1 &
 

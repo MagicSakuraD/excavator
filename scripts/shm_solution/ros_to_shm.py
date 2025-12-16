@@ -29,8 +29,8 @@ class RosToShmBridge(Node):
         # Declare parameters
         self.declare_parameter('input_topic', '/stitched_image')
         self.declare_parameter('shm_path', '/dev/shm/isaac_rgb_buffer')
-        self.declare_parameter('width', 1280)
-        self.declare_parameter('height', 720)
+        self.declare_parameter('width', 1920)
+        self.declare_parameter('height', 1080)
         self.declare_parameter('input_format', 'I420') # RGB or I420
         
         self.input_topic = self.get_parameter('input_topic').value

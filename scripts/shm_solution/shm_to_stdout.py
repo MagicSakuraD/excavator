@@ -20,10 +20,10 @@ from gi.repository import Gst, GLib
 class ShmToStdout:
     def __init__(self,
                  shm_path: str = '/dev/shm/isaac_rgb_buffer',
-                 width: int = 1280,
-                 height: int = 720,
+                 width: int = 1920,
+                 height: int = 1080,
                  fps: int = 20,
-                 bitrate_kbps: int = 4000,
+                 bitrate_kbps: int = 6000,
                  input_format: str = 'I420'):
         self.shm_path = shm_path
         self.width = width
@@ -255,9 +255,14 @@ class ShmToStdout:
             # Use PTS from encoded buffer to keep timestamp aligned even if frames drop
             ts = int(buf.pts) if buf.pts is not None else 0
             # Write header + payload to stdout
-            sys.stdout.buffer.write(struct.pack('>IQ', len(data), ts))
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
+            try:
+                sys.stdout.buffer.write(struct.pack('>IQ', len(data), ts))
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+            except BrokenPipeError:
+                # Go 端已经关闭 stdout 管道，停止进一步输出，避免刷屏
+                print('[ERR] stdout broken pipe, stopping encoder writes', file=sys.stderr, flush=True)
+                return Gst.FlowReturn.ERROR
         finally:
             buf.unmap(map_info)
         return Gst.FlowReturn.OK
@@ -266,10 +271,10 @@ class ShmToStdout:
 def main():
     # Params from environment for simplicity
     shm_path = os.environ.get('SHM_PATH', '/dev/shm/isaac_rgb_buffer')
-    width = int(os.environ.get('WIDTH', '1280'))
-    height = int(os.environ.get('HEIGHT', '720'))
+    width = int(os.environ.get('WIDTH', '1920'))
+    height = int(os.environ.get('HEIGHT', '1080'))
     fps = int(os.environ.get('FPS', '20'))
-    bitrate_kbps = int(os.environ.get('BITRATE_KBPS', '4000'))
+    bitrate_kbps = int(os.environ.get('BITRATE_KBPS', '6000'))
     input_format = os.environ.get('INPUT_FORMAT', 'I420')
 
     app = ShmToStdout(shm_path, width, height, fps, bitrate_kbps, input_format)
