@@ -199,8 +199,8 @@ python3 ros_to_shm.py \
     --ros-args \
     -p input_topic:=/stitched_image \
     -p shm_path:=/dev/shm/isaac_rgb_buffer \
-    -p width:=1280 \
-    -p height:=720
+    -p width:=1920 \
+    -p height:=1080
 ```
 
 ### `ros_control_stdin.py` 参数
@@ -220,10 +220,10 @@ python3 shm_to_h264_publisher.py \
     --ros-args \
     -p output_topic:=/camera/image_h264 \
     -p shm_path:=/dev/shm/isaac_rgb_buffer \
-    -p width:=1280 \
-    -p height:=720 \
+    -p width:=1920 \
+    -p height:=1080 \
     -p fps:=20 \
-    -p bitrate_kbps:=4000
+    -p bitrate_kbps:=6000
 ```
 
 ## 控制指令消息格式

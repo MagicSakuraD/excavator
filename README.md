@@ -112,6 +112,8 @@ go mod tidy
 ```bash
 sudo apt update
 sudo apt install python3-gi python3-gst-1.0 gir1.2-gst-1.0 gstreamer1.0-tools gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
+
+sudo apt install python3-gi python3-gst-1.0 gir1.2-gstreamer-1.0 gstreamer1.0-tools gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
 ```
 - **(可选) 如果你有 NVIDIA 桌面显卡**:
   - 安装最新的 NVIDIA 驱动和 CUDA Toolkit。
@@ -174,7 +176,7 @@ cd ~/code_ws/src/RemoteExcavator/webrtc_excavator/scripts/shm_solution
 # 启动一体化脚本，并以参数形式传入信令服务器地址
 # 默认使用 I420 格式。如果您的摄像头输出 RGB，请 export INPUT_FORMAT=RGB
 # 默认启用音频采集（使用系统默认 USB 麦克风）
-./start_all.sh ws://192.168.0.87:8090/ws
+./start_all.sh ws://192.168.124.3:8090/ws
 ```
 
 ### 真实设备 (I420 摄像头)
@@ -184,7 +186,7 @@ cd ~/code_ws/src/RemoteExcavator/webrtc_excavator/scripts/shm_solution
 ```bash
 # 启动脚本时指定格式为 RGB
 export INPUT_FORMAT=RGB
-./start_all.sh ws://192.168.0.87:8090/ws
+./start_all.sh ws://192.168.124.3:8090/ws
 ```
 
 ### 1080p 及动态分辨率支持
@@ -194,7 +196,7 @@ export INPUT_FORMAT=RGB
 - `shm_to_stdout.py` 会自动监测共享内存的分辨率变化并重启编码管线。
 - 对于 1080p 视频，建议适当提高码率：
   ```bash
-  export BITRATE_KBPS=8000  # 8Mbps
+  export BITRATE_KBPS=6000  # 8Mbps
   ./start_all.sh ...
   ```
 
