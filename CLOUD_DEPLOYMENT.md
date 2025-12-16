@@ -359,7 +359,7 @@ cd /home/orin64/MyCode/PionWebrtc/excavator/web
 nano controller.html
 
 # 找到这一行（约 193 行）：
-const SIGNALING_SERVER = 'ws://localhost:8090/ws';
+const SIGNALING_SERVER = 'ws://192.168.0.87:8090/ws';
 
 # 改为：
 const SIGNALING_SERVER = 'ws://47.98.123.45:8090/ws';

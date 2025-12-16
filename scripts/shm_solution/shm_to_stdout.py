@@ -23,17 +23,18 @@ class ShmToStdout:
                  width: int = 1280,
                  height: int = 720,
                  fps: int = 20,
-                 bitrate_kbps: int = 4000):
+                 bitrate_kbps: int = 4000,
+                 input_format: str = 'I420'):
         self.shm_path = shm_path
         self.width = width
         self.height = height
         self.fps = fps
         self.bitrate_kbps = bitrate_kbps
+        self.input_format = input_format
 
         # SHM layout
         self.header_size = 32
-        self.image_size = self.width * self.height * 3
-        self.total_size = self.header_size + self.image_size
+        self._update_image_size()
 
         # Open SHM (wait if not ready)
         wait_start = time.time()
@@ -58,6 +59,19 @@ class ShmToStdout:
         # Use GLib timer for pushing frames without blocking main loop
         GLib.timeout_add(max(1, int(1000 / (self.fps * 2))), self._tick)
 
+    def _update_image_size(self):
+        if self.input_format in ['I420', 'NV12', 'YV12']:
+            self.image_size = int(self.width * self.height * 1.5)
+        elif self.input_format in ['RGB', 'BGR']:
+            self.image_size = self.width * self.height * 3
+        elif self.input_format in ['RGBA', 'BGRA']:
+            self.image_size = self.width * self.height * 4
+        else:
+            # Default fallback to 3 channels if unknown
+            self.image_size = self.width * self.height * 3
+            
+        self.total_size = self.header_size + self.image_size
+
     def _open_shm_dynamic(self):
         try:
             self.shm_fd = open(self.shm_path, 'rb')
@@ -70,9 +84,8 @@ class ShmToStdout:
             _, w, h, _ = struct.unpack('QIIQ8x', header)
             if w != self.width or h != self.height:
                 self.width, self.height = int(w), int(h)
-                self.image_size = self.width * self.height * 3
-                self.total_size = self.header_size + self.image_size
-            print(f'[INF] Opened SHM {self.shm_path} size={file_size} (w={self.width}, h={self.height})', file=sys.stderr, flush=True)
+                self._update_image_size()
+            print(f'[INF] Opened SHM {self.shm_path} size={file_size} (w={self.width}, h={self.height}, fmt={self.input_format})', file=sys.stderr, flush=True)
         except Exception as e:
             print(f'[ERR] Open SHM failed: {e}', file=sys.stderr, flush=True)
             sys.exit(1)
@@ -104,18 +117,29 @@ class ShmToStdout:
                 raise RuntimeError('SHM reopen timeout')
             time.sleep(0.05)
         self.width, self.height = int(new_w), int(new_h)
-        self.image_size = self.width * self.height * 3
-        self.total_size = self.header_size + self.image_size
+        self._update_image_size()
         print(f'[INF] Reopened SHM for {self.width}x{self.height}', file=sys.stderr, flush=True)
 
     def _pipeline_str(self):
+        # Jetson Orin (JetPack 6.0) Hardware Encoding Pipeline
+        # Uses nvv4l2h264enc (V4L2 H.264 Encoder)
+        
+        # Pipeline steps:
+        # 1. appsrc: Pushes raw data from CPU memory
+        # 2. videoconvert: Ensures format compatibility (CPU side)
+        # 3. nvvidconv: Copies data to NVMM (GPU memory) and converts to NV12
+        # 4. nvv4l2h264enc: Hardware encoding
+        # 5. h264parse: Parses into stream format
+        
         return (
             f"appsrc name=appsrc is-live=true format=time do-timestamp=false block=true ! "
-            f"video/x-raw,format=RGB,width={self.width},height={self.height},framerate={self.fps}/1,interlace-mode=progressive,pixel-aspect-ratio=1/1 ! "
+            f"video/x-raw,format={self.input_format},width={self.width},height={self.height},framerate={self.fps}/1,interlace-mode=progressive,pixel-aspect-ratio=1/1 ! "
             f"videoconvert ! "
-            f"video/x-raw,format=I420,width={self.width},height={self.height},framerate={self.fps}/1,interlace-mode=progressive,pixel-aspect-ratio=1/1 ! "
-            f"nvh264enc bitrate={self.bitrate_kbps} preset=low-latency-hq rc-mode=cbr-ld-hq gop-size={self.fps} ! "
-            f"video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline ! "
+            f"video/x-raw,format=I420,width={self.width},height={self.height},framerate={self.fps}/1 ! "
+            f"nvvidconv ! "
+            f"video/x-raw(memory:NVMM),format=NV12 ! "
+            f"nvv4l2h264enc bitrate={int(self.bitrate_kbps*1000)} preset-level=1 insert-sps-pps=true idrinterval={self.fps} iframeinterval={self.fps} ! "
+            f"video/x-h264,stream-format=byte-stream,alignment=au ! "
             f"h264parse config-interval=-1 ! "
             f"appsink name=sink emit-signals=true max-buffers=5 drop=true sync=false"
         )
@@ -246,8 +270,9 @@ def main():
     height = int(os.environ.get('HEIGHT', '720'))
     fps = int(os.environ.get('FPS', '20'))
     bitrate_kbps = int(os.environ.get('BITRATE_KBPS', '4000'))
+    input_format = os.environ.get('INPUT_FORMAT', 'I420')
 
-    app = ShmToStdout(shm_path, width, height, fps, bitrate_kbps)
+    app = ShmToStdout(shm_path, width, height, fps, bitrate_kbps, input_format)
     loop = GLib.MainLoop()
     try:
         loop.run()

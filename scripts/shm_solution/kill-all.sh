@@ -54,5 +54,8 @@ fi
 echo "  -> Stopping physical camera publisher (ros2_h264_camera_publisher.py)..."
 pkill -f "ros2_h264_camera_publisher.py" || echo "     (not running)"
 
+echo "  -> Stopping Signaling Server (if running locally)..."
+pkill -f "cmd/signaling/main.go" || echo "     (not running)"
+
 echo "✅ Cleanup complete."
 

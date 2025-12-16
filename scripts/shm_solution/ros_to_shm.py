@@ -31,18 +31,17 @@ class RosToShmBridge(Node):
         self.declare_parameter('shm_path', '/dev/shm/isaac_rgb_buffer')
         self.declare_parameter('width', 1280)
         self.declare_parameter('height', 720)
+        self.declare_parameter('input_format', 'I420') # RGB or I420
         
         self.input_topic = self.get_parameter('input_topic').value
         self.shm_path = self.get_parameter('shm_path').value
         self.width = self.get_parameter('width').value
         self.height = self.get_parameter('height').value
+        self.input_format = self.get_parameter('input_format').value
         
         # Calculate buffer size
-        # Header: 32 bytes (timestamp 8 bytes + width 4 bytes + height 4 bytes + frame_counter 8 bytes + reserved 8 bytes)
-        # Image data: width * height * 3 (RGB)
         self.header_size = 32
-        self.image_size = self.width * self.height * 3
-        self.total_size = self.header_size + self.image_size
+        self._update_image_size()
         
         # Create shared memory file
         try:
@@ -84,12 +83,24 @@ class RosToShmBridge(Node):
         )
         
         self.get_logger().info(f'Subscribing to: {self.input_topic}')
-        self.get_logger().info(f'Expected format: rgb8, {self.width}x{self.height} (will adapt if different)')
+        self.get_logger().info(f'Expected format: {self.input_format}, {self.width}x{self.height}')
         self.get_logger().info('Node started successfully')
         
         # Statistics
         self.last_stats_time = time.time()
         self.frames_since_last_stats = 0
+
+    def _update_image_size(self):
+        """Update expected image size based on format."""
+        if self.input_format in ['I420', 'NV12', 'YV12']:
+            self.image_size = int(self.width * self.height * 1.5)
+        elif self.input_format in ['RGBA', 'BGRA']:
+             self.image_size = self.width * self.height * 4
+        else:
+            # Default RGB
+            self.image_size = self.width * self.height * 3
+            
+        self.total_size = self.header_size + self.image_size
 
     def _reallocate_shm(self, new_width: int, new_height: int):
         """Recreate the shared memory file/mapping for a new resolution."""
@@ -103,8 +114,7 @@ class RosToShmBridge(Node):
             # Update dimensions and sizes
             self.width = int(new_width)
             self.height = int(new_height)
-            self.image_size = self.width * self.height * 3
-            self.total_size = self.header_size + self.image_size
+            self._update_image_size()
 
             # Recreate file with new size
             if os.path.exists(self.shm_path):
@@ -122,9 +132,14 @@ class RosToShmBridge(Node):
         """Callback for incoming image messages."""
         try:
             # Validate encoding
-            if msg.encoding != 'rgb8':
+            expected_encoding = 'rgb8'
+            if self.input_format in ['I420', 'NV12']:
+                # Allow common YUV encodings (ros doesn't have a strict standard for I420 string)
+                # We trust the data size check more than the string
+                pass 
+            elif msg.encoding != expected_encoding:
                 self.get_logger().error(
-                    f'Unexpected encoding: {msg.encoding}, expected rgb8',
+                    f'Unexpected encoding: {msg.encoding}, expected {expected_encoding}',
                     throttle_duration_sec=5.0
                 )
                 return
@@ -138,9 +153,21 @@ class RosToShmBridge(Node):
                 self._reallocate_shm(msg.width, msg.height)
             
             # Validate data size
-            expected_size = self.width * self.height * 3
+            expected_size = self.image_size
+            # Temporary re-calc expected size if resolution changed (handled by _reallocate but logic order here matters)
+            # Actually _reallocate is called above, so self.image_size is already updated.
+            
+            # Double check size calculation for current msg dimensions to be safe before realloc logic stabilizes
+            # (Just rely on self.image_size which is updated by _reallocate_shm if resolution changed)
+            
             if len(msg.data) != expected_size:
-                # 如果上游编码器在切换时出现短帧，直接跳过该帧，以免破坏消费者读取
+                # If resolution just changed, we might have a mismatch before reallocation completes? 
+                # No, reallocate is synchronous. 
+                # So if mismatch persists, it's a real format issue.
+                
+                # Check if it matches the *other* format size to give a helpful hint
+                alt_size = int(self.width * self.height * (1.5 if self.input_format == 'RGB' else 3))
+                
                 self.get_logger().warn(
                     f'Data size mismatch: got {len(msg.data)}, expect {expected_size}. Dropping frame.',
                     throttle_duration_sec=1.0

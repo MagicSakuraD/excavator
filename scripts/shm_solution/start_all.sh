@@ -17,12 +17,12 @@ echo "=========================================="
 echo "Starting Excavator-side (ROS->SHM + WebRTC Client)"
 echo "=========================================="
 
-LOG_DIR=~/code_ws/excavator/logs
-mkdir -p "$LOG_DIR"
-
 # Resolve project root and binary path
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BIN_PATH="$PROJECT_ROOT/bin/excavator"
+
+LOG_DIR="$PROJECT_ROOT/logs"
+mkdir -p "$LOG_DIR"
 
 # Read signaling URL from first argument or env SIGNALING_URL
 SIGNALING_URL="${1:-${SIGNALING_URL}}"
@@ -35,6 +35,12 @@ fi
 # Step 1: Start ROS2 to SHM bridge first
 echo ""
 echo "Step 1: Starting ROS2 -> Shared Memory Bridge..."
+if [ "$INPUT_FORMAT" == "RGB" ]; then
+    echo "  [CONFIG] Using RGB format for SHM bridge"
+    export ROS_ARGS="-p input_format:=RGB"
+else
+    echo "  [CONFIG] Using default I420 format for SHM bridge"
+fi
 "$SCRIPT_DIR/start_ros_to_shm.sh"
 sleep 2
 
@@ -60,8 +66,8 @@ echo "All components started! (ROS->SHM + Go WebRTC client)"
 echo "=========================================="
 echo ""
 echo "Monitor logs with:"
-echo "  tail -f ~/code_ws/excavator/logs/ros_to_shm.log"
-echo "  tail -f ~/code_ws/excavator/logs/go_webrtc.log"
+echo "  tail -f $LOG_DIR/ros_to_shm.log"
+echo "  tail -f $LOG_DIR/go_webrtc.log"
 echo ""
 echo "Check status:"
 echo "  ros2 topic list"
