@@ -381,61 +381,66 @@ func createPeerConnection(conn *websocket.Conn) (*webrtc.PeerConnection, error) 
 }
 
 func startVideoStreamForwarder(videoTrack *webrtc.TrackLocalStaticSample) {
-    log.Printf("🚀 启动 GStreamer 硬件编码器 (SHM -> stdout)...")
+	log.Printf("🚀 启动视频流转发器 (Unix Socket -> WebRTC)...")
+	socketPath := "/tmp/excavator_video.sock"
 
-    exePath, err := os.Executable()
-    if err != nil {
-        log.Fatalf("❌ 无法获取当前执行路径: %v", err)
-    }
-    scriptPath := filepath.Join(filepath.Dir(exePath), "..", "scripts", "shm_solution", "shm_to_stdout.py")
+	go func() {
+		for {
+			// 尝试连接 Socket
+			// 注意：在 Windows 本地开发时 DialUnix 可能失败，需使用 Dial("unix", ...) 兼容或条件编译
+			// 但根据指令我们假设目标环境支持 Unix Socket
+			addr, err := net.ResolveUnixAddr("unix", socketPath)
+			if err != nil {
+				log.Printf("❌ 解析 Socket 地址失败: %v", err)
+				time.Sleep(3 * time.Second)
+				continue
+			}
 
-    cmd := exec.Command("python3", scriptPath)
-    stdout, err := cmd.StdoutPipe()
-    if err != nil {
-        log.Fatalf("❌ [Video] 创建 stdout 管道失败: %v", err)
-    }
-    cmd.Stderr = os.Stderr
-    if err := cmd.Start(); err != nil {
-        log.Fatalf("❌ [Video] 启动 shm_to_stdout.py 失败: %v", err)
-    }
-    log.Printf("✅ GStreamer 编码器已启动 (PID: %d)", cmd.Process.Pid)
+			conn, err := net.DialUnix("unix", nil, addr)
+			if err != nil {
+				// log.Printf("⚠️ 等待视频源 (%s)...", err) // 减少日志噪音
+				time.Sleep(1 * time.Second)
+				continue
+			}
 
-    go func() {
-        defer cmd.Process.Kill()
-        defer stdout.Close()
+			log.Printf("✅ 已连接到视频源: %s", socketPath)
 
-        reader := bufio.NewReaderSize(stdout, 128*1024)
-        header := make([]byte, 12) // 4B length + 8B timestamp_ns (big-endian)
-        var lastTs uint64
+			// 读取循环
+			reader := bufio.NewReaderSize(conn, 512*1024) // 512KB buffer
+			lenBuf := make([]byte, 4)
 
-        for {
-            if _, err := io.ReadFull(reader, header); err != nil {
-                if err == io.EOF {
-                    log.Printf("ℹ️ [Video] stdout 结束")
-                } else {
-                    log.Printf("❌ [Video] 读取头失败: %v", err)
-                }
-                break
-            }
-            frameLen := binary.BigEndian.Uint32(header[0:4])
-            tsNs := binary.BigEndian.Uint64(header[4:12])
-            if frameLen == 0 || frameLen > 2*1024*1024 {
-                log.Printf("⚠️ [Video] 异常帧长: %d", frameLen)
-                continue
-            }
-            frame := make([]byte, frameLen)
-            if _, err := io.ReadFull(reader, frame); err != nil {
-                log.Printf("❌ [Video] 读取帧失败: %v", err)
-                break
-            }
-            dur := time.Second / time.Duration(*defaultFPS)
-            if lastTs > 0 && tsNs > lastTs {
-                dur = time.Duration(tsNs - lastTs)
-            }
-            lastTs = tsNs
-            _ = videoTrack.WriteSample(media.Sample{Data: frame, Duration: dur})
-        }
-    }()
+			for {
+				// 1. 读取长度 (4 bytes, BigEndian)
+				if _, err := io.ReadFull(reader, lenBuf); err != nil {
+					log.Printf("❌ [Video] Socket 读取中断: %v", err)
+					break
+				}
+
+				frameLen := binary.BigEndian.Uint32(lenBuf)
+				if frameLen == 0 || frameLen > 5*1024*1024 { // Sanity check 5MB
+					log.Printf("⚠️ [Video] 异常帧长: %d", frameLen)
+					continue
+				}
+
+				// 2. 读取负载
+				frameData := make([]byte, frameLen)
+				if _, err := io.ReadFull(reader, frameData); err != nil {
+					log.Printf("❌ [Video] 帧读取中断: %v", err)
+					break
+				}
+
+				// 3. 写入 WebRTC
+				dur := time.Second / time.Duration(*defaultFPS)
+				if err := videoTrack.WriteSample(media.Sample{Data: frameData, Duration: dur}); err != nil {
+					// log.Printf("⚠️ WebRTC 写入失败: %v", err)
+				}
+			}
+
+			conn.Close()
+			log.Printf("🔄 视频连接断开，1秒后重连...")
+			time.Sleep(1 * time.Second)
+		}
+	}()
 }
 
 func startControlStreamForwarder(controlTopic string) {
