@@ -57,6 +57,14 @@ var (
 	controlStdin      io.WriteCloser
 	audioPlaybackConn net.Conn // UDP 连接，用于发送接收到的音频到播放器
 	
+	// DataChannel 引用（由前端创建，Go 端被动接收）
+	telemetryChannel *webrtc.DataChannel
+	telemetryMu      sync.Mutex
+	
+	// 最新的遥测数据（由 Python 脚本提供）
+	latestTelemetry   []byte
+	latestTelemetryMu sync.RWMutex
+	
 	// 重连配置
 	reconnectBaseDelay = 2 * time.Second
 	reconnectMaxDelay  = 60 * time.Second
@@ -109,6 +117,9 @@ func main() {
 
 	// 启动控制转发器 (stdin -> ROS2)
 	go startControlStreamForwarder(*ros2ControlTopic)
+
+	// 启动遥测数据转发器 (ROS2 -> telemetry channel)
+	go startTelemetryForwarder()
 
 	// ====== 无限重连循环 ======
 	reconnectDelay := reconnectBaseDelay
@@ -329,23 +340,24 @@ func createPeerConnection(conn *websocket.Conn) (*webrtc.PeerConnection, error) 
 	})
 
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		log.Printf("✅ 浏览器创建了 DataChannel: '%s'", dc.Label())
+		label := dc.Label()
+		log.Printf("✅ 浏览器创建了 DataChannel: '%s'", label)
 
-		dc.OnOpen(func() {
-			log.Printf("✅ DataChannel '%s' 已打开", dc.Label())
-		})
-
-        dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-            if controlStdin != nil {
-                go publishControlToROS2(msg.Data)
-            } else {
-                log.Printf("⚠️ 收到控制指令，但控制管道未就绪")
-            }
-        })
-
-		dc.OnClose(func() {
-			log.Printf("🔴 DataChannel '%s' 已关闭", dc.Label())
-		})
+		// 根据通道名称分类处理
+		switch label {
+		case "controls":
+			setupControlsChannel(dc)
+		case "telemetry":
+			setupTelemetryChannel(dc)
+		default:
+			log.Printf("⚠️ 未知的 DataChannel: %s", label)
+			dc.OnOpen(func() {
+				log.Printf("✅ DataChannel '%s' 已打开", label)
+			})
+			dc.OnClose(func() {
+				log.Printf("🔴 DataChannel '%s' 已关闭", label)
+			})
+		}
 	})
 
 	// 处理接收到的远程音频轨道 (来自控制端的麦克风)
@@ -463,6 +475,147 @@ func publishControlToROS2(data []byte) {
 		log.Printf("❌ 写入控制指令到 stdin 失败: %v", err)
 		// 如果写入失败，可能是 Python 进程已退出，这里可以记录但不中断程序
 	}
+}
+
+// --- DataChannel 处理函数 ---
+
+func setupControlsChannel(dc *webrtc.DataChannel) {
+	dc.OnOpen(func() {
+		log.Printf("🎮 Controls 通道已打开")
+	})
+
+	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		if controlStdin != nil {
+			go publishControlToROS2(msg.Data)
+		} else {
+			log.Printf("⚠️ 收到控制指令，但控制管道未就绪")
+		}
+	})
+
+	dc.OnClose(func() {
+		log.Printf("🔴 Controls 通道已关闭")
+	})
+}
+
+func setupTelemetryChannel(dc *webrtc.DataChannel) {
+	dc.OnOpen(func() {
+		log.Printf("📡 Telemetry 通道已打开，开始推送数据...")
+		
+		// 保存通道引用
+		telemetryMu.Lock()
+		telemetryChannel = dc
+		telemetryMu.Unlock()
+		
+		// 启动遥测数据发送循环
+		go startTelemetrySendLoop(dc)
+	})
+
+	dc.OnClose(func() {
+		log.Printf("🔴 Telemetry 通道已关闭")
+		
+		telemetryMu.Lock()
+		telemetryChannel = nil
+		telemetryMu.Unlock()
+	})
+}
+
+func startTelemetrySendLoop(dc *webrtc.DataChannel) {
+	ticker := time.NewTicker(33 * time.Millisecond) // ~30Hz
+	defer ticker.Stop()
+
+	for range ticker.C {
+		// 检查通道状态
+		if dc.ReadyState() != webrtc.DataChannelStateOpen {
+			log.Printf("🛑 Telemetry 通道已断开，停止发送")
+			return
+		}
+
+		// 获取最新遥测数据
+		latestTelemetryMu.RLock()
+		data := latestTelemetry
+		latestTelemetryMu.RUnlock()
+
+		if data == nil {
+			continue
+		}
+
+		// 发送数据
+		if err := dc.Send(data); err != nil {
+			log.Printf("❌ 遥测发送失败: %v", err)
+		}
+	}
+}
+
+func startTelemetryForwarder() {
+	log.Printf("📡 启动 ROS2 遥测转发器 (ROS2 -> telemetry channel)...")
+
+	rosPath, rosPathOk := os.LookupEnv("ROS_DISTRO")
+	if !rosPathOk || rosPath == "" {
+		log.Printf("⚠️ ROS2 环境未加载，遥测功能将不可用")
+		return
+	}
+
+	exePath, err := os.Executable()
+	if err != nil {
+		log.Printf("❌ 无法获取当前执行路径: %v", err)
+		return
+	}
+	scriptPath := filepath.Join(filepath.Dir(exePath), "..", "scripts", "shm_solution", "ros_telemetry_stdout.py")
+
+	cmd := exec.Command("python3", scriptPath,
+		"--topic", "/cannode/chassis_feedback",
+		"--device-id", "excavator_xc958",
+		"--rate", "30")
+	
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Printf("❌ [Telemetry] 创建 stdout 管道失败: %v", err)
+		return
+	}
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		log.Printf("❌ [Telemetry] 启动 ros_telemetry_stdout.py 失败: %v", err)
+		return
+	}
+	log.Printf("✅ ROS2 遥测转发器已启动 (PID: %d)", cmd.Process.Pid)
+
+	// 读取 Python 脚本输出的 JSON 行
+	go func() {
+		defer cmd.Process.Kill()
+		defer stdout.Close()
+
+		scanner := bufio.NewScanner(stdout)
+		// 增大缓冲区以处理较大的 JSON
+		scanner.Buffer(make([]byte, 64*1024), 64*1024)
+
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if len(line) == 0 {
+				continue
+			}
+
+			// 复制数据并更新最新遥测
+			data := make([]byte, len(line))
+			copy(data, line)
+
+			latestTelemetryMu.Lock()
+			latestTelemetry = data
+			latestTelemetryMu.Unlock()
+		}
+
+		if err := scanner.Err(); err != nil {
+			log.Printf("❌ [Telemetry] 读取失败: %v", err)
+		}
+		log.Printf("ℹ️ [Telemetry] stdout 结束")
+	}()
+
+	// 监控进程
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			log.Printf("⚠️ [Telemetry] ros_telemetry_stdout.py 退出: %v", err)
+		}
+	}()
 }
 
 // --- Supabase Integration ---

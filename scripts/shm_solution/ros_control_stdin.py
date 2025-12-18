@@ -60,7 +60,7 @@ class ControlStdinNode(Node):
             
             msg_count += 1
             # 每 100 条消息记录一次日志（避免日志过多）
-            if msg_count % 100 == 0:
+            if msg_count % 10000 == 0:
                 self.get_logger().info(f'已发布 {msg_count} 条控制指令')
         
         self.get_logger().info(f'stdin 已关闭，退出读取循环（共处理 {msg_count} 条消息）')

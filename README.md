@@ -169,9 +169,13 @@ sudo apt install python3-gi python3-gst-1.0 gir1.2-gstreamer-1.0 gstreamer1.0-to
 
 ```bash
 # source ROS2 环境
+
 source /opt/ros/humble/setup.bash
 
-cd ~/code_ws/src/RemoteExcavator/webrtc_excavator/scripts/shm_solution
+cd /home/nvidia/code/excavator && go build -o bin/excavator ./cmd/excavator/
+
+
+cd scripts/shm_solution
 
 # 启动一体化脚本，并以参数形式传入信令服务器地址
 # 默认使用 I420 格式。如果您的摄像头输出 RGB，请 export INPUT_FORMAT=RGB
